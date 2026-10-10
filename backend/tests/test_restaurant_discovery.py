@@ -328,6 +328,66 @@ async def test_tavily_outage_preserves_place_results_and_adds_warning() -> None:
     assert response.warnings == ["Tavily is offline"]
 
 
+@pytest.mark.anyio
+async def test_missing_places_key_uses_tavily_as_unverified_discovery_fallback() -> None:
+    search = StaticSearchProvider(
+        [
+            SearchResult(
+                url="https://nori.example/menu",
+                title="Nori menu",
+                snippet="Restaurant menu",
+            ),
+            SearchResult(
+                url="https://nori.example/menu#today",
+                title="Nori menu duplicate",
+            ),
+        ]
+    )
+
+    class StaticVerifier:
+        async def verify(self, candidate: RestaurantCandidate) -> RestaurantCandidate:
+            return candidate
+
+    class StaticMenuResearcher:
+        async def research(
+            self, candidate: RestaurantCandidate, _: RestaurantSearchRequest
+        ) -> RestaurantCandidate:
+            return candidate
+
+    service = RestaurantDiscoveryService(
+        search,
+        StaticVerifier(),
+        places_provider=None,
+        menu_researcher=StaticMenuResearcher(),
+    )
+    response = await service.discover(RestaurantSearchRequest(location="Kyoto"))
+
+    assert len(response.restaurants) == 1
+    candidate = response.restaurants[0]
+    assert candidate.restaurant_name == "Nori"
+    assert candidate.city_or_address is None
+    assert candidate.official_website_url is None
+    assert candidate.menu_url == "https://nori.example/menu"
+    assert candidate.menu_items == []
+    assert candidate.dietary_suitability == "unconfirmed"
+    assert "GOOGLE_PLACES_API_KEY is missing" in response.warnings[0]
+    assert "ratings, hours" in response.warnings[0]
+    assert "restaurants in Kyoto" in search.queries[0]
+
+
+@pytest.mark.anyio
+async def test_missing_places_and_tavily_credentials_return_no_results_and_clear_errors() -> None:
+    service = RestaurantDiscoveryService(
+        StaticSearchProvider(error=SearchProviderError("TAVILY_API_KEY is missing")),
+        SourceVerifier(safety_check=allow_url),
+        places_provider=None,
+    )
+    response = await service.discover(RestaurantSearchRequest(location="Kyoto"))
+    assert response.restaurants == []
+    assert "GOOGLE_PLACES_API_KEY is missing" in response.warnings
+    assert "TAVILY_API_KEY is missing" in response.warnings
+
+
 def test_menu_evidence_does_not_infer_dietary_or_allergy_safety_or_currency() -> None:
     request = RestaurantSearchRequest(
         location="Kyoto",

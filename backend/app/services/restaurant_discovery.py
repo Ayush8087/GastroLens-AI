@@ -41,13 +41,6 @@ class RestaurantDiscoveryService:
         report("Searching location-aware restaurant listings")
         location = request.location or _location_from_query(request.query)
         warnings: list[str] = []
-        if self.places_provider is None:
-            report("Restaurant discovery provider is not configured")
-            return RestaurantSearchResponse(
-                criteria=request,
-                restaurants=[],
-                warnings=["Location-aware restaurant discovery is not configured."],
-            )
         if not location:
             report("A location is needed before searching listings")
             return RestaurantSearchResponse(
@@ -58,28 +51,99 @@ class RestaurantDiscoveryService:
                 ],
             )
         query = _search_query(request, location)
-        try:
-            places = await self.places_provider.search_places(
-                query, max_results=request.max_results
-            )
-        except PlacesProviderError as exc:
-            report("Restaurant listings could not be retrieved")
-            return RestaurantSearchResponse(criteria=request, restaurants=[], warnings=[str(exc)])
-        except Exception as exc:
-            report("Restaurant listings could not be retrieved")
-            logger.exception(
-                "unexpected_places_provider_failure", extra={"error_type": type(exc).__name__}
-            )
-            return RestaurantSearchResponse(
-                criteria=request,
-                restaurants=[],
-                warnings=["Restaurant location search is temporarily unavailable."],
-            )
-
-        report(f"Found {len(places)} listing candidates; checking sources and menus")
-
         candidates: list[RestaurantCandidate] = []
         now = datetime.now(UTC)
+        places = []
+        places_failure: str | None = None
+        if self.places_provider is not None:
+            try:
+                places = await self.places_provider.search_places(
+                    query, max_results=request.max_results
+                )
+            except PlacesProviderError as exc:
+                places_failure = str(exc)
+            except Exception as exc:
+                logger.exception(
+                    "unexpected_places_provider_failure", extra={"error_type": type(exc).__name__}
+                )
+                places_failure = "Google Places is temporarily unavailable."
+        else:
+            places_failure = "GOOGLE_PLACES_API_KEY is missing."
+
+        if places_failure and self.search_provider:
+            report("Using web search fallback for restaurant leads")
+            try:
+                results = await self.search_provider.search(
+                    f"restaurants in {location}"
+                    + (f" {request.meal}" if request.meal else "")
+                    + (f" {request.preferred_cuisine}" if request.preferred_cuisine else ""),
+                    max_results=request.max_results,
+                )
+            except SearchProviderError as exc:
+                return RestaurantSearchResponse(
+                    criteria=request,
+                    restaurants=[],
+                    warnings=[places_failure, str(exc)],
+                    provider_coverage=(
+                        "Google Places structured listings are unavailable. Tavily web search "
+                        "also requires configuration and cannot provide structured ratings, "
+                        "hours, or complete geographic coverage."
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("tavily_discovery_failure", extra={"error_type": type(exc).__name__})
+                return RestaurantSearchResponse(
+                    criteria=request,
+                    restaurants=[],
+                    warnings=[places_failure, "Web search fallback is temporarily unavailable."],
+                    provider_coverage=(
+                        "Google Places structured listings are unavailable; web search fallback "
+                        "could not be completed."
+                    ),
+                )
+            warnings.append(
+                f"{places_failure} Using Tavily web results as unverified leads; addresses, "
+                "ratings, hours, and geographic coverage are not guaranteed."
+            )
+            seen_urls: set[str] = set()
+            for result in results:
+                url = normalize_url(result.url)
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                name = _candidate_name(result.title, url)
+                if not name:
+                    continue
+                is_menu = bool(
+                    re.search(r"menu|carta|karte|men[uú]", f"{url} {result.title}", re.I)
+                )
+                candidates.append(
+                    RestaurantCandidate(
+                        restaurant_name=name,
+                        menu_url=url if is_menu else None,
+                        source_evidence=[
+                            SourceEvidence(
+                                url=url,
+                                title=result.title or None,
+                                snippet=result.snippet or None,
+                                source_type="unclassified",
+                                retrieved_at=now,
+                                note=(
+                                    "Web search lead only; listing identity and address are "
+                                    "unverified."
+                                ),
+                            )
+                        ],
+                        retrieved_at=now,
+                        unknown_fields=["address", "official_website_url", "menu"],
+                    )
+                )
+
+        report(
+            f"Found {len(places) if not places_failure else len(candidates)} candidates; "
+            "checking sources and menus"
+        )
+
         for place in places:
             evidence: list[SourceEvidence] = []
             if place.maps_url:
@@ -139,7 +203,7 @@ class RestaurantDiscoveryService:
 
         # Search is used only to locate additional source pages. A search snippet never
         # overrides Google Places identity/address data and never confirms a menu item.
-        if self.search_provider and candidates:
+        if places and self.search_provider and candidates:
             for candidate in candidates[: min(len(candidates), 5)]:
                 try:
                     web_results = await self.search_provider.search(
@@ -236,10 +300,24 @@ class RestaurantDiscoveryService:
             restaurants=checked,
             warnings=sorted(set(warnings)),
             provider_coverage=(
-                "Restaurant listings are provided by Google Places. Results depend on its "
+                "Tavily web search is a lower-confidence fallback and does not supply "
+                "structured ratings, hours, or complete geographic coverage."
+                if places_failure
+                else "Restaurant listings are provided by Google Places. Results depend on its "
                 "regional coverage and may omit businesses or current availability."
             ),
         )
+
+
+def _candidate_name(title: str, url: str) -> str | None:
+    cleaned = re.sub(r"\s*[|–—-]\s*(menu|official website|home)\b.*$", "", title, flags=re.I)
+    cleaned = re.sub(r"\b(menu|official website|home)\b", "", cleaned, flags=re.I).strip(" -|–—")
+    if len(cleaned) >= 2:
+        return cleaned[:160]
+    host = (url.split("//", 1)[-1].split("/", 1)[0]).removeprefix("www.")
+    host = host.split(":", 1)[0]
+    label = host.split(".", 1)[0].replace("-", " ").strip()
+    return label.title() if len(label) >= 2 else None
 
 
 def _location_from_query(query: str | None) -> str | None:

@@ -18,11 +18,11 @@ Scanned PDFs are not OCR processed. The current menu extractor focuses on clear 
 
 - Node.js 20.9+ and npm
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- A Google Places API key with Places API (New) enabled for real restaurant discovery
-- A Tavily API key for official website/menu source discovery
+- A Google Places API key with Places API (New) enabled for structured restaurant discovery (recommended)
+- A Tavily API key for menu/source discovery and best-effort discovery fallback
 - An OpenAI API key only when requesting menu translation
 
-Google Places Text Search is the discovery provider; enable Places API (New) in the Google Cloud project. Missing `GOOGLE_PLACES_API_KEY` yields an explicit warning and no restaurant results. Tavily and OpenAI are optional enrichments, and neither key is exposed to the browser. Provider coverage varies by location; there is no global completeness guarantee. Google documents this endpoint as a POST to `places.googleapis.com/v1/places:searchText` with a required field mask ([Text Search API](https://developers.google.com/maps/documentation/places/web-service/text-search)).
+Google Places Text Search is the preferred discovery provider; enable Places API (New) in the Google Cloud project. If Google Places is missing or unavailable, Tavily can return web search leads. Those leads have no structured address, ratings, or hours and remain unverified; Tavily does not promise complete geographic coverage. If both providers are unconfigured, search returns an empty result with configuration warnings. Tavily also locates candidate official sites and menu pages. OpenAI is only used for optional translation. All keys remain server-side. Provider coverage varies by location; there is no global completeness guarantee. Google documents this endpoint as a POST to `places.googleapis.com/v1/places:searchText` with a required field mask ([Text Search API](https://developers.google.com/maps/documentation/places/web-service/text-search)).
 
 ## Configure
 
