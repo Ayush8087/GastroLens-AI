@@ -115,11 +115,15 @@ class SourceVerifier:
     ) -> tuple[int | None, str | None, str | None, bool]:
         current = url
         owns_client = self.client is None
-        client = self.client or httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout),
-            follow_redirects=False,
-            trust_env=False,
-            headers={"User-Agent": "GastroLensResearch/0.1 (+source verification)"},
+        client = (
+            self.client
+            if self.client is not None
+            else httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                follow_redirects=False,
+                trust_env=False,
+                headers={"User-Agent": "GastroLensResearch/0.1 (+source verification)"},
+            )
         )
         try:
             for _ in range(MAX_REDIRECTS + 1):

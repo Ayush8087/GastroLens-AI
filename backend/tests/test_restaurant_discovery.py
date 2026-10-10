@@ -1,24 +1,34 @@
 from datetime import UTC, datetime
 
 import httpx
+import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
+from app.api.routes.restaurants import get_discovery_service
 from app.core.config import Settings, get_settings
+from app.integrations.places import GooglePlacesProvider, PlaceRecord, PlacesProviderError
 from app.integrations.tavily_search import SearchProviderError, TavilySearchProvider
+from app.integrations.translation import OpenAITranslationProvider
 from app.main import app
 from app.schemas.restaurant_search import (
+    MenuItem,
     RestaurantCandidate,
     RestaurantSearchRequest,
     SearchResult,
-    SourceEvidence,
 )
-from app.services.restaurant_discovery import RestaurantDiscoveryService, _candidates_from_results
+from app.services.menu_research import (
+    MenuResearchService,
+    _extract_text,
+    _parse_menu_lines,
+    _score_candidate,
+)
+from app.services.restaurant_discovery import RestaurantDiscoveryService
 from app.services.source_verification import SourceVerifier, normalize_url
 
 
-class StaticProvider:
+class StaticSearchProvider:
     def __init__(
         self, results: list[SearchResult] | None = None, error: Exception | None = None
     ) -> None:
@@ -33,200 +43,428 @@ class StaticProvider:
         return self.results
 
 
+class StaticPlacesProvider:
+    def __init__(self, places: list[PlaceRecord] | None = None) -> None:
+        self.places = places or []
+        self.query = ""
+
+    async def search_places(self, query: str, *, max_results: int) -> list[PlaceRecord]:
+        self.query = query
+        return self.places[:max_results]
+
+
 async def allow_url(_: str) -> bool:
     return True
 
 
-async def allow_restaurant_host(url: str) -> bool:
-    return httpx.URL(url).host == "greenfork.example"
-
-
-def _candidate(url: str, *, name: str | None = "Green Fork") -> RestaurantCandidate:
-    return RestaurantCandidate(
-        restaurant_name=name,
-        source_evidence=[SourceEvidence(url=url, retrieved_at=datetime.now(UTC))],
-        retrieved_at=datetime.now(UTC),
+def _place() -> PlaceRecord:
+    return PlaceRecord(
+        place_id="places/abc123",
+        name="Garden Table",
+        address="12 Market Street, Kyoto",
+        website_url="https://gardentable.example/menu",
+        maps_url="https://maps.example/place/abc123",
+        business_status="OPERATIONAL",
     )
 
 
-def test_request_preferences_are_validated_and_default_to_barcelona_vegetarian() -> None:
-    request = RestaurantSearchRequest(meal="lunch")
-    assert request.city == "Barcelona"
+def test_request_has_no_location_diet_or_currency_defaults_and_parses_obvious_terms() -> None:
+    request = RestaurantSearchRequest(query="vegetarian dinner in Kyoto under 20")
+    assert request.location == "Kyoto"
+    assert request.meal == "dinner"
     assert request.dietary_requirements == ["vegetarian"]
-    assert request.currency == "EUR"
-
-    with pytest.raises(ValidationError):
-        RestaurantSearchRequest(meal="brunch")  # type: ignore[arg-type]
-    with pytest.raises(ValidationError):
-        RestaurantSearchRequest(meal="dinner", max_results=21)
-
-
-def test_candidates_deduplicate_normalized_urls_but_keep_other_branches() -> None:
-    candidates = _candidates_from_results(
-        [
-            SearchResult(url="HTTPS://greenfork.example/menu#lunch", title="Green Fork Menu"),
-            SearchResult(url="https://greenfork.example/menu", title="Green Fork Menu"),
-            SearchResult(
-                url="https://greenfork.example/other-branch", title="Green Fork Barcelona"
-            ),
-        ]
-    )
-    assert len(candidates) == 2
-    assert candidates[0].menu_url == "https://greenfork.example/menu"
-    assert candidates[0].dietary_suitability == "unconfirmed"
-
-
-def test_candidate_keeps_missing_optional_fields_unknown() -> None:
-    candidate = _candidates_from_results([SearchResult(url="https://example.org/page")])[0]
-    assert candidate.restaurant_name is None
-    assert candidate.city_or_address is None
-    assert candidate.official_website_url is None
-    assert candidate.menu_url is None
-    assert "city_or_address" in candidate.unknown_fields
-
-
-def test_invalid_urls_are_rejected_for_candidate_and_normalizer() -> None:
+    assert request.currency is None
+    assert request.max_budget_per_person == 20
+    assert RestaurantSearchRequest(query="dinner in Osaka, allergic to peanuts").allergies == [
+        "peanuts"
+    ]
     assert normalize_url("javascript:alert(1)") is None
     assert normalize_url("https://user:password@example.com") is None
-    assert _candidates_from_results([SearchResult(url="file:///etc/passwd")]) == []
+    with pytest.raises(ValidationError):
+        RestaurantSearchRequest(max_results=21)
 
 
 @pytest.mark.anyio
-async def test_missing_tavily_key_returns_a_clear_provider_error() -> None:
-    provider = TavilySearchProvider(None)
+async def test_google_places_provider_parses_live_provider_contract_deterministically() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Goog-Api-Key"] == "test-key"
+        assert "places.formattedAddress" in request.headers["X-Goog-FieldMask"]
+        return httpx.Response(
+            200,
+            json={
+                "places": [
+                    {
+                        "id": "places/1",
+                        "displayName": {"text": "Nori"},
+                        "formattedAddress": "Kyoto",
+                        "websiteUri": "https://nori.example",
+                        "businessStatus": "OPERATIONAL",
+                    },
+                    {
+                        "id": "places/1",
+                        "displayName": {"text": "Nori duplicate"},
+                        "formattedAddress": "Kyoto",
+                    },
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        places = await GooglePlacesProvider(SecretStr("test-key"), client=client).search_places(
+            "restaurants in Kyoto", max_results=10
+        )
+    assert len(places) == 1
+    assert places[0].name == "Nori"
+    assert places[0].address == "Kyoto"
+
+
+@pytest.mark.anyio
+async def test_google_places_missing_credentials_are_explicit() -> None:
+    with pytest.raises(PlacesProviderError, match="GOOGLE_PLACES_API_KEY"):
+        await GooglePlacesProvider(None).search_places("restaurants in Kyoto", max_results=10)
+
+
+@pytest.mark.anyio
+async def test_tavily_missing_credentials_and_malformed_payload_are_clear() -> None:
     with pytest.raises(SearchProviderError, match="TAVILY_API_KEY"):
-        await provider.search("vegetarian lunch Barcelona")
+        await TavilySearchProvider(None).search("menu")
 
-
-@pytest.mark.anyio
-async def test_tavily_malformed_response_is_reported_without_fake_results() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"answer": "not a result list"})
+        return httpx.Response(200, json={"answer": "not results"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = TavilySearchProvider(SecretStr("test-key"), client=client, attempts=1)
         with pytest.raises(SearchProviderError, match="malformed"):
-            await provider.search("vegetarian lunch Barcelona")
+            await provider.search("menu")
 
 
 @pytest.mark.anyio
-async def test_tavily_rate_limit_uses_bounded_retries() -> None:
-    request_count = 0
+async def test_tavily_rate_limit_retries_are_bounded() -> None:
+    calls = 0
 
     async def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal request_count
-        request_count += 1
+        nonlocal calls
+        calls += 1
         return httpx.Response(429)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = TavilySearchProvider(
-            SecretStr("test-key"), client=client, attempts=10, retry_delay=0
+            SecretStr("test-key"), client=client, attempts=20, retry_delay=0
         )
         with pytest.raises(SearchProviderError, match="temporarily unavailable"):
-            await provider.search("vegetarian lunch Barcelona")
-    assert request_count == 3
+            await provider.search("menu")
+    assert calls == 3
 
 
 @pytest.mark.anyio
-async def test_provider_outage_returns_empty_results_and_warning() -> None:
-    service = RestaurantDiscoveryService(
-        StaticProvider(error=SearchProviderError("provider unavailable")),
-        SourceVerifier(safety_check=allow_url),
-    )
-    result = await service.discover(RestaurantSearchRequest(meal="lunch"))
-    assert result.restaurants == []
-    assert result.warnings == ["provider unavailable"]
-
-
-@pytest.mark.anyio
-async def test_successful_discovery_queries_multiple_sources_and_deduplicates() -> None:
-    provider = StaticProvider(
-        [SearchResult(url="https://greenfork.example/menu", title="Green Fork Menu")]
-    )
-
-    async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="Green Fork is open for lunch")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        service = RestaurantDiscoveryService(
-            provider, SourceVerifier(client, safety_check=allow_url)
-        )
-        result = await service.discover(RestaurantSearchRequest(meal="lunch"))
-
-    assert len(provider.queries) == 3
-    assert len(result.restaurants) == 1
-    assert result.restaurants[0].menu_url == "https://greenfork.example/menu"
-    assert result.restaurants[0].verification_status == "verified"
-    assert result.restaurants[0].dietary_suitability == "unconfirmed"
-
-
-@pytest.mark.anyio
-async def test_verification_failure_does_not_claim_accessibility_or_dietary_fit() -> None:
+async def test_google_places_outage_is_reported_without_results() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(503)
 
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = GooglePlacesProvider(SecretStr("test-key"), client=client)
+        with pytest.raises(PlacesProviderError, match="temporarily unavailable"):
+            await provider.search_places("restaurants in Kyoto", max_results=10)
+
+
+@pytest.mark.anyio
+async def test_real_search_vertical_slice_keeps_location_identity_and_menu_evidence() -> None:
+    search = StaticSearchProvider(
+        [SearchResult(url="https://gardentable.example/menu", title="Garden Table menu")]
+    )
+    places = StaticPlacesProvider([_place()])
+
+    async def page(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "gardentable.example":
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><h1>Garden Table</h1><h2>SMALL PLATES</h2>"
+                    "<p>Vegan mushroom toast — with thyme €14.00</p>"
+                    "<p>Seasonal soup €9.50</p></body></html>"
+                ),
+                headers={"content-type": "text/html"},
+            )
+        return httpx.Response(200, text="Garden Table listing")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(page)) as client:
+        service = RestaurantDiscoveryService(
+            search_provider=search,
+            verifier=SourceVerifier(client, safety_check=allow_url),
+            places_provider=places,
+            menu_researcher=MenuResearchService(client, safety_check=allow_url),
+        )
+        response = await service.discover(
+            RestaurantSearchRequest(location="Kyoto", dietary_requirements=["vegan"])
+        )
+    assert places.query == "restaurants Kyoto vegan"
+    assert len(response.restaurants) == 1
+    candidate = response.restaurants[0]
+    assert candidate.restaurant_name == "Garden Table"
+    assert candidate.city_or_address == "12 Market Street, Kyoto"
+    assert candidate.menu_items[0].name == "Vegan mushroom toast"
+    assert candidate.menu_items[0].description == "with thyme"
+    assert candidate.menu_items[0].price == 14.0
+    assert candidate.menu_items[0].currency == "EUR"
+    assert candidate.menu_items[0].dietary_status == "confirmed"
+    assert candidate.match_status == "exact_match"
+    assert candidate.menu_items[0].evidence == "Vegan mushroom toast — with thyme €14.00"
+
+
+def test_http_search_route_returns_provider_backed_restaurant_data() -> None:
+    async def page(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="Garden Table restaurant")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(page))
+    service = RestaurantDiscoveryService(
+        search_provider=StaticSearchProvider(),
+        verifier=SourceVerifier(async_client, safety_check=allow_url),
+        places_provider=StaticPlacesProvider([_place()]),
+    )
+    app.dependency_overrides[get_discovery_service] = lambda: service
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/restaurants/search",
+                json={"location": "Kyoto", "meal": "dinner"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+        import asyncio
+
+        asyncio.run(async_client.aclose())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["restaurants"][0]["place_id"] == "places/abc123"
+    assert body["restaurants"][0]["city_or_address"] == "12 Market Street, Kyoto"
+    assert body["restaurants"][0]["match_status"] == "uncertain"
+
+
+def test_streaming_route_emits_progress_and_final_result_events() -> None:
+    place = PlaceRecord(
+        place_id="place-stream",
+        name="Nori",
+        address="Kyoto",
+        website_url=None,
+        maps_url=None,
+        business_status="OPERATIONAL",
+    )
+    service = RestaurantDiscoveryService(
+        StaticSearchProvider(),
+        SourceVerifier(safety_check=allow_url),
+        StaticPlacesProvider([place]),
+    )
+    app.dependency_overrides[get_discovery_service] = lambda: service
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/v1/restaurants/search/stream", json={"location": "Kyoto"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    assert "event: progress" in response.text
+    assert '"stage": "Found 1 listing candidates' in response.text
+    assert "event: result" in response.text
+    assert '"place_id": "place-stream"' in response.text
+
+
+@pytest.mark.anyio
+async def test_missing_location_and_provider_outage_return_no_fabricated_results() -> None:
+    no_location = RestaurantDiscoveryService(
+        StaticSearchProvider(), SourceVerifier(), StaticPlacesProvider()
+    )
+    result = await no_location.discover(RestaurantSearchRequest(query="a cozy dinner"))
+    assert result.restaurants == []
+    assert "Add a location" in result.warnings[0]
+
+    async def failure(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(failure)) as client:
+        provider = GooglePlacesProvider(SecretStr("key"), client=client)
+        with pytest.raises(PlacesProviderError, match="temporarily unavailable"):
+            await provider.search_places("restaurants in Kyoto", max_results=5)
+
+
+@pytest.mark.anyio
+async def test_provider_address_outside_requested_location_remains_uncertain() -> None:
+    place = PlaceRecord(
+        place_id="place-outside",
+        name="Garden Table",
+        address="Osaka",
+        website_url=None,
+        maps_url=None,
+        business_status="OPERATIONAL",
+    )
+    service = RestaurantDiscoveryService(
+        StaticSearchProvider(),
+        SourceVerifier(safety_check=allow_url),
+        StaticPlacesProvider([place]),
+    )
+    response = await service.discover(
+        RestaurantSearchRequest(location="Kyoto", dietary_requirements=["vegan"])
+    )
+    assert response.restaurants[0].location_match == "unconfirmed"
+    assert response.restaurants[0].match_status == "uncertain"
+
+
+@pytest.mark.anyio
+async def test_tavily_outage_preserves_place_results_and_adds_warning() -> None:
+    place = PlaceRecord(
+        place_id="place-1",
+        name="Nori",
+        address="Kyoto",
+        website_url=None,
+        maps_url=None,
+        business_status="OPERATIONAL",
+    )
+    service = RestaurantDiscoveryService(
+        StaticSearchProvider(error=SearchProviderError("Tavily is offline")),
+        SourceVerifier(safety_check=allow_url),
+        StaticPlacesProvider([place]),
+    )
+    response = await service.discover(RestaurantSearchRequest(location="Kyoto"))
+    assert len(response.restaurants) == 1
+    assert response.warnings == ["Tavily is offline"]
+
+
+def test_menu_evidence_does_not_infer_dietary_or_allergy_safety_or_currency() -> None:
+    request = RestaurantSearchRequest(
+        location="Kyoto",
+        dietary_requirements=["vegetarian"],
+        allergies=["sesame"],
+        max_budget_per_person=20,
+    )
+    items = _parse_menu_lines(
+        "Vegetarian curry $12.00\nSesame noodles 10.50\nPlain rice 4.00",
+        "https://restaurant.example/menu",
+        request,
+    )
+    assert items[0].dietary_status == "confirmed"
+    assert items[0].currency is None  # Dollar sign alone cannot identify a currency.
+    assert items[1].dietary_status == "contradicted"
+    assert items[2].dietary_status == "unknown"
+
+
+def test_budget_matching_needs_matching_explicit_currency() -> None:
+    request = RestaurantSearchRequest(
+        location="Kyoto",
+        dietary_requirements=["vegetarian"],
+        max_budget_per_person=20,
+        currency="USD",
+    )
+    items = _parse_menu_lines("Vegetarian curry €12.00", "https://restaurant.example/menu", request)
+    assert items[0].currency == "EUR"
+    assert items[0].dietary_status == "confirmed"
+    status, _, _ = _score_candidate(items, request)
+    assert status == "partial_match"
+
+    yen = _parse_menu_lines("Tofu bowl JPY 1400", "https://restaurant.example/menu", request)
+    assert yen[0].currency == "JPY"
+    assert _score_candidate(yen, request)[0] == "uncertain"
+
+
+def test_pdf_menu_text_is_extracted_with_printed_evidence() -> None:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Vegetarian lentil bowl EUR 15.00")
+    pdf_bytes = document.tobytes()
+    document.close()
+    text = _extract_text(pdf_bytes, "application/pdf", "https://restaurant.example/menu.pdf")
+    assert "Vegetarian lentil bowl EUR 15.00" in text
+
+
+@pytest.mark.anyio
+async def test_translation_output_cannot_change_source_evidence_or_matching_facts() -> None:
+    async def hallucinating_translation(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"translations":["Gluten-free vegan feast USD 0"]}'}}
+                ]
+            },
+        )
+
+    item = MenuItem(
+        name="Soup",
+        original_text="Soup with dairy EUR 12.00",
+        price=12,
+        currency="EUR",
+        source_url="https://restaurant.example/menu",
+        evidence="Soup with dairy EUR 12.00",
+        dietary_status="contradicted",
+    )
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), follow_redirects=False
+        transport=httpx.MockTransport(hallucinating_translation)
     ) as client:
-        verified = await SourceVerifier(client, safety_check=allow_url).verify(
-            _candidate("https://greenfork.example")
+        translator = OpenAITranslationProvider(SecretStr("test-key"), client=client)
+        assert await translator.translate([item], "English")
+    assert item.translated_text == "Gluten-free vegan feast USD 0"
+    assert item.evidence == "Soup with dairy EUR 12.00"
+    assert item.price == 12
+    assert item.currency == "EUR"
+    assert item.dietary_status == "contradicted"
+
+
+@pytest.mark.anyio
+async def test_wrong_restaurant_menu_identity_is_not_used() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="<p>Completely Different Cafe</p><p>Vegan bowl EUR 12.00</p>",
+            headers={"content-type": "text/html"},
         )
-    assert verified.verification_status == "discovered"
-    assert verified.source_evidence[0].accessible is False
-    assert verified.dietary_suitability == "unconfirmed"
-
-
-@pytest.mark.anyio
-async def test_accessible_matching_site_can_verify_source_but_not_dietary_suitability() -> None:
-    async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="Green Fork Restaurant")
-
-    result = _candidates_from_results(
-        [SearchResult(url="https://greenfork.example", title="Green Fork")]
-    )[0]
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        verified = await SourceVerifier(client, safety_check=allow_url).verify(result)
-    assert verified.verification_status == "verified"
-    assert verified.dietary_suitability == "unconfirmed"
-    assert verified.source_evidence[0].accessible is True
-
-
-@pytest.mark.anyio
-async def test_unsafe_redirect_target_is_blocked() -> None:
-    async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await SourceVerifier(client, safety_check=allow_restaurant_host).verify(
-            _candidate("https://greenfork.example")
+        candidate = RestaurantCandidate(
+            restaurant_name="Garden Table",
+            official_website_url="https://gardentable.example",
+            menu_url="https://other.example/menu",
+            source_evidence=[],
+            retrieved_at=datetime.now(UTC),
         )
-    assert result.source_evidence[0].accessible is False
-    assert "unsafe redirect" in (result.source_evidence[0].note or "")
+        result = await MenuResearchService(client, safety_check=allow_url).research(
+            candidate,
+            RestaurantSearchRequest(location="Kyoto", dietary_requirements=["vegan"]),
+        )
+    assert result.menu_items == []
+    assert result.match_status == "uncertain"
+    assert "identity" in result.match_reasons[0]
 
 
 @pytest.mark.anyio
-async def test_verifier_rejects_private_and_local_hosts_without_http_request() -> None:
+async def test_menu_redirect_to_private_network_is_blocked() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        pytest.fail("unsafe host must not be requested")
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+    async def safety(url: str) -> bool:
+        return "127.0.0.1" not in url
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        verifier = SourceVerifier(client)
-        result = await verifier.verify(_candidate("http://127.0.0.1/"))
-    assert result.source_evidence[0].accessible is False
-    assert "unsafe" in (result.source_evidence[0].note or "")
+        research = MenuResearchService(client, safety_check=safety)
+        candidate = RestaurantCandidate(
+            restaurant_name="Nori",
+            menu_url="https://restaurant.example/menu",
+            source_evidence=[],
+            retrieved_at=datetime.now(UTC),
+        )
+        result = await research.research(candidate, RestaurantSearchRequest(location="Kyoto"))
+    assert result.menu_items == []
+    assert result.match_status == "uncertain"
 
 
-def test_search_route_returns_structured_warning_when_key_is_missing() -> None:
+def test_search_route_reports_missing_provider_configuration() -> None:
     get_settings.cache_clear()
     app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None)
     try:
         with TestClient(app) as client:
-            response = client.post("/api/v1/restaurants/search", json={"meal": "breakfast"})
+            response = client.post("/api/v1/restaurants/search", json={"location": "Kyoto"})
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
     assert response.status_code == 200
     data = response.json()
-    assert data["criteria"]["city"] == "Barcelona"
+    assert data["criteria"]["location"] == "Kyoto"
     assert data["restaurants"] == []
-    assert "TAVILY_API_KEY" in data["warnings"][0]
+    assert "GOOGLE_PLACES_API_KEY" in data["warnings"][0]

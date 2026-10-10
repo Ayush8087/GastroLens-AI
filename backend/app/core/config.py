@@ -22,7 +22,9 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000"]
     )
     openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-4o-mini"
     tavily_api_key: SecretStr | None = None
+    google_places_api_key: SecretStr | None = None
 
     @field_validator("cors_origins", mode="before")
     @classmethod

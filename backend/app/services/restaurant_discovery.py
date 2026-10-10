@@ -1,191 +1,268 @@
+import asyncio
 import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
-from urllib.parse import urlsplit
 
+from app.integrations.places import PlaceSearchProvider, PlacesProviderError
 from app.integrations.search import SearchProvider
 from app.integrations.tavily_search import SearchProviderError
 from app.schemas.restaurant_search import (
     RestaurantCandidate,
     RestaurantSearchRequest,
     RestaurantSearchResponse,
-    SearchResult,
     SourceEvidence,
 )
+from app.services.menu_research import MenuResearchService
 from app.services.source_verification import SourceVerifier, normalize_url
 
 logger = logging.getLogger(__name__)
 
 
 class RestaurantDiscoveryService:
-    def __init__(self, search_provider: SearchProvider, verifier: SourceVerifier) -> None:
+    def __init__(
+        self,
+        search_provider: SearchProvider,
+        verifier: SourceVerifier,
+        places_provider: PlaceSearchProvider | None = None,
+        menu_researcher: MenuResearchService | None = None,
+    ) -> None:
         self.search_provider = search_provider
         self.verifier = verifier
+        self.places_provider = places_provider
+        self.menu_researcher = menu_researcher or MenuResearchService()
 
-    async def discover(self, request: RestaurantSearchRequest) -> RestaurantSearchResponse:
-        queries = _build_queries(request)
+    async def discover(
+        self,
+        request: RestaurantSearchRequest,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> RestaurantSearchResponse:
+        report = progress_callback or (lambda _: None)
+        report("Searching location-aware restaurant listings")
+        location = request.location or _location_from_query(request.query)
         warnings: list[str] = []
-        results: list[SearchResult] = []
-        for query in queries:
-            try:
-                results.extend(await self.search_provider.search(query, max_results=5))
-            except SearchProviderError as exc:
-                warnings.append(str(exc))
-                logger.warning(
-                    "restaurant_search_provider_failure",
-                    extra={"query_category": _query_category(query)},
-                )
-                break
-            except Exception as exc:
-                warnings.append("Restaurant search is temporarily unavailable.")
-                logger.exception(
-                    "unexpected_search_provider_failure", extra={"error_type": type(exc).__name__}
-                )
-                break
-        candidates = _candidates_from_results(results)
-        if not candidates and warnings:
+        if self.places_provider is None:
+            report("Restaurant discovery provider is not configured")
             return RestaurantSearchResponse(
-                criteria=request, restaurants=[], warnings=list(dict.fromkeys(warnings))
+                criteria=request,
+                restaurants=[],
+                warnings=["Location-aware restaurant discovery is not configured."],
             )
-        candidates = candidates[: request.max_results]
-        verified = [await self.verifier.verify(candidate) for candidate in candidates]
+        if not location:
+            report("A location is needed before searching listings")
+            return RestaurantSearchResponse(
+                criteria=request,
+                restaurants=[],
+                warnings=[
+                    "Add a location, or include one in your description (for example, ‘in Kyoto’)."
+                ],
+            )
+        query = _search_query(request, location)
+        try:
+            places = await self.places_provider.search_places(
+                query, max_results=request.max_results
+            )
+        except PlacesProviderError as exc:
+            report("Restaurant listings could not be retrieved")
+            return RestaurantSearchResponse(criteria=request, restaurants=[], warnings=[str(exc)])
+        except Exception as exc:
+            report("Restaurant listings could not be retrieved")
+            logger.exception(
+                "unexpected_places_provider_failure", extra={"error_type": type(exc).__name__}
+            )
+            return RestaurantSearchResponse(
+                criteria=request,
+                restaurants=[],
+                warnings=["Restaurant location search is temporarily unavailable."],
+            )
+
+        report(f"Found {len(places)} listing candidates; checking sources and menus")
+
+        candidates: list[RestaurantCandidate] = []
+        now = datetime.now(UTC)
+        for place in places:
+            evidence: list[SourceEvidence] = []
+            if place.maps_url:
+                url = normalize_url(place.maps_url)
+                if url:
+                    evidence.append(
+                        SourceEvidence(
+                            url=url,
+                            title=f"{place.name} on Google Maps",
+                            source_type="third_party",
+                            retrieved_at=now,
+                            note="Place identity and address supplied by Google Places.",
+                        )
+                    )
+            website = normalize_url(place.website_url) if place.website_url else None
+            discovered_menu = (
+                website
+                if website and re.search(r"menu|carta|karte|men[uú]", website, re.IGNORECASE)
+                else None
+            )
+            if website:
+                evidence.append(
+                    SourceEvidence(
+                        url=website,
+                        title=place.name,
+                        source_type="restaurant_site_candidate",
+                        retrieved_at=now,
+                    )
+                )
+            candidates.append(
+                RestaurantCandidate(
+                    restaurant_name=place.name,
+                    city_or_address=place.address,
+                    official_website_url=website,
+                    menu_url=discovered_menu,
+                    source_evidence=evidence,
+                    retrieved_at=now,
+                    unknown_fields=[
+                        key
+                        for key, value in (
+                            ("address", place.address),
+                            ("official_website", website),
+                            ("menu", None),
+                        )
+                        if value is None
+                    ],
+                    place_id=place.place_id,
+                    maps_url=place.maps_url,
+                    business_status=place.business_status,
+                    location_match=(
+                        "confirmed"
+                        if location.casefold() in (place.address or "").casefold()
+                        else "unconfirmed"
+                    ),
+                )
+            )
+
+        # Search is used only to locate additional source pages. A search snippet never
+        # overrides Google Places identity/address data and never confirms a menu item.
+        if self.search_provider and candidates:
+            for candidate in candidates[: min(len(candidates), 5)]:
+                try:
+                    web_results = await self.search_provider.search(
+                        f'"{candidate.restaurant_name}" {location} official menu', max_results=3
+                    )
+                except SearchProviderError as exc:
+                    warnings.append(str(exc))
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "tavily_enrichment_failure", extra={"error_type": type(exc).__name__}
+                    )
+                    warnings.append("Some restaurant source pages could not be searched.")
+                    break
+                for result in web_results:
+                    url = normalize_url(result.url)
+                    if url is None:
+                        continue
+                    is_menu = bool(
+                        re.search(
+                            r"menu|carta|karte|men[uú]",
+                            f"{url} {result.title}",
+                            re.IGNORECASE,
+                        )
+                    )
+                    if any(source.url == url for source in candidate.source_evidence):
+                        if is_menu and candidate.menu_url is None:
+                            candidate.menu_url = url
+                            candidate.unknown_fields = [
+                                value for value in candidate.unknown_fields if value != "menu"
+                            ]
+                        continue
+                    candidate.source_evidence.append(
+                        SourceEvidence(
+                            url=url,
+                            title=result.title or None,
+                            snippet=result.snippet or None,
+                            source_type="unclassified",
+                            retrieved_at=datetime.now(UTC),
+                        )
+                    )
+                    if candidate.menu_url is None and is_menu:
+                        candidate.menu_url = url
+                        candidate.unknown_fields = [
+                            value for value in candidate.unknown_fields if value != "menu"
+                        ]
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def verify_candidate(candidate: RestaurantCandidate) -> RestaurantCandidate:
+            async with semaphore:
+                return await _verify_and_research(candidate)
+
+        async def _verify_and_research(candidate: RestaurantCandidate) -> RestaurantCandidate:
+            report(f"Checking source evidence for {candidate.restaurant_name or 'a restaurant'}")
+            verified = await self.verifier.verify(candidate)
+            if verified.menu_url:
+                report(
+                    f"Reading the discovered menu for {verified.restaurant_name or 'a restaurant'}"
+                )
+                try:
+                    verified = await self.menu_researcher.research(verified, request)
+                except Exception as exc:
+                    logger.warning(
+                        "menu_research_failure", extra={"error_type": type(exc).__name__}
+                    )
+                    warnings.append(f"Could not research the menu for {verified.restaurant_name}.")
+            if verified.location_match == "unconfirmed":
+                verified.match_status = "uncertain"
+                verified.score = min(verified.score, 35)
+                verified.match_reasons.append(
+                    "The provider address does not explicitly confirm the requested location."
+                )
+            if verified.business_status in {"CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"}:
+                verified.match_status = "excluded"
+                verified.score = 0
+                verified.match_reasons.append(
+                    "The listing provider reports that this business is closed."
+                )
+            return verified
+
+        checked = await asyncio.gather(*(verify_candidate(candidate) for candidate in candidates))
+        priority = {"exact_match": 0, "partial_match": 1, "uncertain": 2, "excluded": 3}
+        checked.sort(
+            key=lambda item: (
+                priority[item.match_status],
+                -item.score,
+                (item.restaurant_name or "").casefold(),
+                item.place_id or "",
+            )
+        )
         return RestaurantSearchResponse(
             criteria=request,
-            restaurants=verified,
-            warnings=list(dict.fromkeys(warnings)),
+            restaurants=checked,
+            warnings=sorted(set(warnings)),
+            provider_coverage=(
+                "Restaurant listings are provided by Google Places. Results depend on its "
+                "regional coverage and may omit businesses or current availability."
+            ),
         )
 
 
-def _build_queries(request: RestaurantSearchRequest) -> list[str]:
-    food_terms = " ".join(request.dietary_requirements)
-    cuisine = f" {request.preferred_cuisine}" if request.preferred_cuisine else ""
-    base = f"{food_terms}{cuisine} restaurants {request.meal} in {request.city}"
-    queries = [base, f"{base} official website", f"{base} menu carta"]
-    if request.max_budget_per_person is not None:
-        queries[0] += f" under {request.max_budget_per_person:g} {request.currency} per person"
-    return queries
+def _location_from_query(query: str | None) -> str | None:
+    if not query:
+        return None
+    match = re.search(r"\b(?:in|near|around)\s+([^,.;!?]+)", query, re.IGNORECASE)
+    return match.group(1).strip()[:160] if match else None
 
 
-def _query_category(query: str) -> str:
-    return "menu" if "menu" in query else "official" if "official" in query else "discovery"
-
-
-def _candidates_from_results(results: list[SearchResult]) -> list[RestaurantCandidate]:
-    now = datetime.now(UTC)
-    candidates: list[RestaurantCandidate] = []
-    by_url: dict[str, RestaurantCandidate] = {}
-    for result in results:
-        normalized = normalize_url(result.url)
-        if normalized is None:
-            continue
-        existing = by_url.get(normalized)
-        name = _name_from_title(result.title)
-        source_type = _source_type(normalized, name)
-        evidence = SourceEvidence(
-            url=normalized,
-            title=result.title or None,
-            snippet=result.snippet or None,
-            source_type=source_type,
-            retrieved_at=now,
-        )
-        if existing:
-            if all(source.url != normalized for source in existing.source_evidence):
-                existing.source_evidence.append(evidence)
-            if not existing.menu_url and _looks_like_menu(normalized, result.title):
-                existing.menu_url = normalized
-            continue
-        candidate = RestaurantCandidate(
-            restaurant_name=name,
-            official_website_url=None,
-            menu_url=normalized if _looks_like_menu(normalized, result.title) else None,
-            source_evidence=[evidence],
-            retrieved_at=now,
-            unknown_fields=[],
-        )
-        candidate.unknown_fields = _unknown_fields(candidate)
-        identity_match = next(
-            (item for item in candidates if _same_restaurant_identity(item, candidate)),
-            None,
-        )
-        if identity_match is not None:
-            identity_match.source_evidence.append(evidence)
-            if identity_match.menu_url is None:
-                identity_match.menu_url = candidate.menu_url
-            by_url[normalized] = identity_match
-            continue
-        by_url[normalized] = candidate
-        candidates.append(candidate)
-    return candidates
-
-
-def _source_type(url: str, name: str | None) -> str:
-    host = (urlsplit(url).hostname or "").lower()
-    directory_hosts = (
-        "tripadvisor.",
-        "yelp.",
-        "thefork.",
-        "google.",
-        "facebook.",
-        "instagram.",
-        "wanderlog.",
-    )
-    if any(domain in host for domain in directory_hosts):
-        return "third_party"
-    if name:
-        name_tokens = {token for token in re.findall(r"[a-z0-9]+", name.lower()) if len(token) > 2}
-        site_host = host.removeprefix("www.")
-        host_label = re.sub(r"[^a-z0-9]", "", site_host.split(".")[0])
-        name_compact = "".join(re.findall(r"[a-z0-9]+", name.lower()))
-        host_tokens = set(re.findall(r"[a-z0-9]+", site_host.split(".")[0]))
-        if name_tokens and (
-            name_tokens.issubset(host_tokens)
-            or (len(name_compact) > 3 and name_compact in host_label)
-        ):
-            return "restaurant_site_candidate"
-    return "unclassified"
-
-
-def _name_from_title(title: str) -> str | None:
-    if title:
-        name = re.split(r"\s(?:\||–|—|::|·)\s", title, maxsplit=1)[0].strip()
-        name = re.sub(r"\s+(?:menu|carta|official website)$", "", name, flags=re.IGNORECASE)
-        if name:
-            return name[:160]
-    return None
-
-
-def _unknown_fields(candidate: RestaurantCandidate) -> list[str]:
-    missing = [
-        field
-        for field, value in (
-            ("restaurant_name", candidate.restaurant_name),
-            ("city_or_address", candidate.city_or_address),
-            ("official_website_url", candidate.official_website_url),
-            ("menu_url", candidate.menu_url),
-        )
-        if value is None
-    ]
-    missing.extend(["restaurant_identity", "vegetarian_suitability"])
-    return missing
-
-
-def _same_restaurant_identity(first: RestaurantCandidate, second: RestaurantCandidate) -> bool:
-    if not first.restaurant_name or not second.restaurant_name:
-        return False
-    if not first.city_or_address or not second.city_or_address:
-        return False
-    normalized_name = " ".join(re.findall(r"[a-z0-9]+", first.restaurant_name.casefold()))
-    second_name = " ".join(re.findall(r"[a-z0-9]+", second.restaurant_name.casefold()))
-    normalized_address = " ".join(re.findall(r"[a-z0-9]+", first.city_or_address.casefold()))
-    second_address = " ".join(re.findall(r"[a-z0-9]+", second.city_or_address.casefold()))
-    first_host = (urlsplit(first.source_evidence[0].url).hostname or "").removeprefix("www.")
-    second_host = (urlsplit(second.source_evidence[0].url).hostname or "").removeprefix("www.")
-    return (
-        normalized_name == second_name
-        and normalized_address == second_address
-        and first_host == second_host
-    )
-
-
-def _looks_like_menu(url: str, title: str) -> bool:
-    return bool(re.search(r"menu|carta", f"{url} {title}", re.IGNORECASE))
+def _search_query(request: RestaurantSearchRequest, location: str) -> str:
+    if request.query:
+        details = [f"restaurants {request.query}"]
+        if request.meal:
+            details.append(request.meal)
+        if request.preferred_cuisine:
+            details.append(request.preferred_cuisine)
+        details.extend(request.dietary_requirements)
+        details.append(f"in {location}")
+        return " ".join(dict.fromkeys(details))
+    details = ["restaurants", location]
+    if request.meal:
+        details.append(request.meal)
+    if request.preferred_cuisine:
+        details.append(request.preferred_cuisine)
+    details.extend(request.dietary_requirements)
+    return " ".join(details)

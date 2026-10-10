@@ -1,18 +1,12 @@
-# Known limitations
+# Limitations
 
-- No restaurant discovery, identity verification, menu retrieval, PDF parsing flow, review analysis, ranking, or citation API is implemented.
-- No database engine, session lifecycle, models, or Alembic migration environment is configured yet; only a declarative model base and dependencies exist.
-- Provider protocols define replaceable boundaries but have no network implementation and do not imply that credentials or services are available.
-- The health endpoint is process liveness only. It does not verify PostgreSQL, Tavily, or OpenAI.
-- Source freshness, licensing and terms for collected content, multilingual quality, and dietary safety need explicit policies before production recommendations.
-- Browser automation is intentionally omitted; Playwright should be added only for pages that cannot be handled through HTTPX and static extraction.
-
-# Discovery limitations
-
-- Tavily snippets are search-provider summaries. They can be stale or incomplete and are retained as leads, not proof of menu contents, prices, opening hours, or vegetarian suitability.
-- Website classification uses conservative directory-host exclusions and a name/domain token match. It does not establish legal ownership; `verified` only describes an accessible page whose text matches the discovered name.
-- The engine deduplicates normalized URLs and does not merge separate pages into restaurant identities. Search can return multiple pages or branches for the same restaurant.
-- Menu URLs may be discovered, but this phase does not parse HTML or PDF menus. An accessibility result does not establish that a page is a menu or that its contents are current.
-- The verifier checks DNS addresses before requests and manually validates redirects. DNS can change between validation and connection; a future deployment should consider outbound network egress controls or DNS-pinned transport for stronger rebinding protection.
-- Search and verification are synchronous with the request and bounded to three provider searches and at most twenty returned candidates. Large-scale crawling, caching, persistence, and background processing are not included.
-- No database, OpenAI call, review analysis, translation, ranking, or restaurant availability check is performed.
+- **Provider coverage:** restaurant discovery requires Google Places and depends on Google coverage, listing quality, and API availability. This product does not promise worldwide completeness.
+- **Search context:** natural-language parsing currently recognizes only explicit meal names, a small set of common dietary terms, and clear `in/near/around` locations. Other preferences remain search context; they are not converted into authoritative constraints.
+- **Identity and freshness:** Google Places supplies listing identity/address/business status. Website name matching is a consistency check, not proof of ownership, and provider records can be stale.
+- **Menus:** Tavily is used to find candidate menu URLs. Search snippets are not menu evidence. Only accessible HTML and text-based PDF content are extracted; scanned PDFs, image menus, complex tables, and no-price items may be missed.
+- **Diet and allergens:** explicit labels and literal avoid terms are surfaced conservatively. The service cannot establish cross-contamination, ingredient absence, halal/kosher status, or allergy safety from silence. Unknown remains unknown.
+- **Price and currency:** only printed prices are extracted. Currency is taken from an explicit code or unambiguous EUR/GBP symbol; `$` is intentionally ambiguous. Budget checks need matching currency and do not include tax, tip, or service fees unless printed as part of a dish price.
+- **Translation:** requires `OPENAI_API_KEY`, may be unavailable, and is a translation aid. Original text and source evidence remain authoritative.
+- **Availability:** a provider business status does not establish current opening hours, table availability, or reservation availability.
+- **Security:** HTTP(S), private/local destinations, redirect targets, response size, and timeouts are checked. DNS validation is separate from connection resolution; production egress filtering or DNS-pinned transport would improve rebinding resistance.
+- **No persistence:** PostgreSQL dependencies are present from the foundation but not used. Searches are synchronous and are not saved.
