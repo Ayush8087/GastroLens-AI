@@ -17,3 +17,8 @@ def test_settings_reject_wildcard_cors_origin() -> None:
 def test_settings_reject_unknown_environment() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, app_env="staging")  # type: ignore[arg-type]
+
+
+def test_settings_validate_gemini_model_name() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, gemini_model="../../unexpected")

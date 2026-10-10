@@ -51,7 +51,12 @@ class TavilySearchProvider(SearchProvider):
             for attempt in range(self.attempts):
                 try:
                     response = await client.post(self.endpoint, json=payload)
-                    if response.status_code == 429 or response.status_code >= 500:
+                    if response.status_code == 429:
+                        if attempt + 1 < self.attempts:
+                            await asyncio.sleep(self.retry_delay * (2**attempt))
+                            continue
+                        raise SearchProviderError("Tavily rate limit or quota was exceeded.")
+                    if response.status_code >= 500:
                         if attempt + 1 < self.attempts:
                             await asyncio.sleep(self.retry_delay * (2**attempt))
                             continue

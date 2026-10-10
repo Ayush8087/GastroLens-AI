@@ -85,4 +85,29 @@ describe("restaurant search experience", () => {
     expect(await screen.findByText(/try another location or broaden your description/i)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("uses browser coordinates only after the user requests current location", async () => {
+    const getCurrentPosition = vi.fn((success: PositionCallback) => success({
+      coords: { latitude: 12.97, longitude: 77.59 },
+    } as GeolocationPosition));
+    Object.defineProperty(navigator, "geolocation", {
+      configurable: true,
+      value: { getCurrentPosition },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ restaurants: [], warnings: [], provider_coverage: "" }),
+    } as Response);
+    render(<Home />);
+    fireEvent.click(screen.getByRole("button", { name: /use my current location/i }));
+    expect(await screen.findByText(/using your current location/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /find restaurants/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      latitude: 12.97,
+      longitude: 77.59,
+      search_radius_meters: 5000,
+    });
+  });
 });

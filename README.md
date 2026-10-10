@@ -1,32 +1,39 @@
 # GastroLens-AI
 
-GastroLens researches real restaurants against user-specified needs and returns source-linked findings with uncertainty visible. Locations, cuisines, diets, and currencies are optional user inputs; no destination or dietary preference is assumed. Results depend on the configured provider's geographic coverage and accuracy.
+GastroLens researches restaurants against user-provided locations and preferences, then returns source-linked menu findings with uncertainty visible. Locations, currencies, cuisines, and dietary preferences are not hardcoded. Coverage depends on Google Places and Tavily availability in the requested area.
 
-## What works in this slice
+## Current workflow
 
-- Natural-language search text plus optional location, meal, cuisine, dietary terms, avoided ingredients, allergies, budget, currency, and translation language.
-- Restaurant discovery from Google Places, including provider-supplied name, address, Maps listing, and business status.
-- Tavily source discovery for relevant restaurant/menu pages, and safe URL checking before menu retrieval.
-- Text extraction from HTML pages and text-based PDFs, with source URL and exact printed line retained for priced dishes.
-- Conservative, deterministic dish and restaurant statuses. Explicit menu labels can confirm a requested diet; literal avoid/allergy terms can contradict it. Missing evidence stays uncertain.
-- Optional menu translation through OpenAI. Original menu text remains alongside translations.
-- Responsive search UI connected to the API, with loading, warnings, empty results, retry, and provider configuration messages.
+- Natural-language requests are interpreted by Gemini when configured, then validated against the original text. A conservative phrase parser remains as a fallback.
+- Google Places is the structured discovery provider. Tavily provides a lower-confidence restaurant lead fallback and finds candidate restaurant/menu sources.
+- Menu links are searched on restaurant websites and retrieved only after HTTP(S), public-address, redirect, timeout, and response-size checks.
+- HTML and text PDFs are parsed locally. Gemini can return structured exact source quotes; each quoted item is checked against retrieved text and the printed price is parsed locally. Scanned PDF OCR is attempted through Gemini when text extraction yields no priced items.
+- Gemini translations are separate fields; the original name, description, price, currency, and evidence remain unchanged.
+- Deterministic Python rules evaluate explicit menu labels, literal avoid conflicts, printed prices, currencies, and location distance. Unknown allergy or dietary status is never treated as safe.
+- The frontend streams actual backend progress, supports browser geolocation, shows dish evidence and links, and includes loading, retry, cancellation, warning, and empty states.
 
-Scanned PDFs are not OCR processed. The current menu extractor focuses on clear lines with printed prices and may miss complex menu layouts. Availability and provider status are snapshots; they do not guarantee a table or current operation. Review analysis and ranking from reviews are not implemented.
+Review analysis, reservations, persistence, currency conversion, and complete worldwide coverage are not implemented. Scanned PDF vision extraction and Gemini outputs require a configured key and have not been live-tested in this workspace. OCR transcripts are surfaced as unverified suggestions and cannot qualify dietary or hard budget matches.
 
 ## Requirements
 
 - Node.js 20.9+ and npm
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- A Google Places API key with Places API (New) enabled for structured restaurant discovery (recommended)
-- A Tavily API key for menu/source discovery and best-effort discovery fallback
-- An OpenAI API key only when requesting menu translation
+- `GOOGLE_PLACES_API_KEY` for structured discovery and coordinate-based search
+- `TAVILY_API_KEY` for menu/source discovery and web-search fallback
+- `GEMINI_API_KEY` for natural-language interpretation, structured extraction, scanned PDF fallback, and translation
 
-Google Places Text Search is the preferred discovery provider; enable Places API (New) in the Google Cloud project. If Google Places is missing or unavailable, Tavily can return web search leads. Those leads have no structured address, ratings, or hours and remain unverified; Tavily does not promise complete geographic coverage. If both providers are unconfigured, search returns an empty result with configuration warnings. Tavily also locates candidate official sites and menu pages. OpenAI is only used for optional translation. All keys remain server-side. Provider coverage varies by location; there is no global completeness guarantee. Google documents this endpoint as a POST to `places.googleapis.com/v1/places:searchText` with a required field mask ([Text Search API](https://developers.google.com/maps/documentation/places/web-service/text-search)).
+Enable Places API (New) in Google Cloud. Create a Tavily key in [Tavily](https://app.tavily.com/home). Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/app/apikey). Usage may incur provider charges or be limited by quota; check each provider's current [Google Places pricing](https://mapsplatform.google.com/pricing/), [Tavily plans](https://tavily.com/#pricing), and [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing). Google Places is preferred. Tavily fallback results do not include structured Google ratings, hours, or verified addresses, and do not provide complete geographic coverage. If credentials are absent, the app does not fabricate results. Keys remain on the backend.
 
 ## Configure
 
-Copy `backend/.env.example` to `backend/.env`. Fill the provider keys you intend to use. Keep `OPENAI_API_KEY`, `TAVILY_API_KEY`, and `GOOGLE_PLACES_API_KEY` server-side only. `APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, and `CORS_ORIGINS` are also backend settings. Set `CORS_ORIGINS` to the exact frontend origin in deployment.
+From the repository root in Windows PowerShell:
+
+```powershell
+Copy-Item backend/.env.example backend/.env
+Copy-Item frontend/.env.example frontend/.env.local
+```
+
+Add the provider values to `backend/.env`. The supported names are `GOOGLE_PLACES_API_KEY`, `TAVILY_API_KEY`, `GEMINI_API_KEY`, and optional `GEMINI_MODEL` (default `gemini-3.8-flash`). `APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, and `CORS_ORIGINS` are backend settings. Set `CORS_ORIGINS` to the exact frontend origin in deployment. `.env` files are Git-ignored.
 
 For local development, `frontend/.env.example` can be copied to `frontend/.env.local`. It points to `http://localhost:8000`; the variable contains no secrets.
 
@@ -47,6 +54,7 @@ npm run dev
 ```
 
 Open `http://localhost:3000`. The API liveness endpoint is `/health`; development OpenAPI docs are at `/docs`.
+Check local key configuration without making provider requests at `http://localhost:8000/health/providers` or with `Invoke-RestMethod http://localhost:8000/health/providers`. This endpoint reports only whether a key is configured; it does not validate credentials or spend API credits.
 
 ## Search API
 
@@ -56,6 +64,7 @@ The frontend uses `POST /api/v1/restaurants/search/stream` for server-sent progr
 {
   "query": "A relaxed dinner with vegetarian options in Kyoto",
   "location": "Kyoto",
+  "search_radius_meters": 3000,
   "meal": "dinner",
   "dietary_requirements": ["vegetarian"],
   "avoided_ingredients": [],
@@ -64,22 +73,23 @@ The frontend uses `POST /api/v1/restaurants/search/stream` for server-sent progr
   "max_budget_per_person": null,
   "currency": null,
   "target_language": "English",
+  "other_preferences": ["quiet", "outdoor seating"],
   "max_results": 10
 }
 ```
 
-All constraints except the result limit are optional. Obvious meal/diet/location phrases are extracted conservatively from `query`; if no location is found, the response asks for one. The response contains criteria, restaurants, provider warnings, coverage notes, source evidence, verification and match statuses, printed menu evidence, and unknown fields. A missing provider key returns no fabricated results.
+All constraints except the result limit are optional. When Gemini is unavailable, common meal, diet, location, radius, and budget expressions are parsed conservatively. A location is required unless browser coordinates are supplied. Geolocation uses explicit browser permission and a 5 km Places bias by default. Text-only radius values are hints and cannot enforce exact distance. Response criteria include validated filters; provider warnings and unknown fields explain missing or unverified information.
 
 ### Status meanings
 
 - `discovered`: returned by the listing provider; no confirming restaurant website evidence was established.
 - `partially_verified`: at least one source was accessible, but restaurant identity or ownership is incomplete.
-- `verified`: the source page is accessible and its text matches the provider-supplied restaurant name. This does not prove ownership, current operation, or dietary suitability.
+- `verified`: an accessible restaurant-site candidate contains the provider-supplied restaurant name. This is a consistency check, not proof of ownership, current operation, or dietary suitability.
 - `exact_match`, `partial_match`, `uncertain`, `excluded`: deterministic menu-evidence assessment. A requested allergy or avoided ingredient is never treated as safe merely because a menu line omits it.
 
 Scores use fixed evidence tiers: 90 for an explicitly labeled dietary match with a satisfied requested budget and no unresolved meal, cuisine, allergy, or avoid constraint; 60 for partial evidence; 35 when important facts remain unknown; and 0 for an excluded candidate. Exclusion requires explicit conflicting menu text or comparable printed prices that all exceed the budget. Results sort by status, score, name, then provider place ID.
 
-Every extracted dish retains the source URL, exact line, and retrieval timestamp. Translation is presented separately and is not treated as source evidence. Printed price currency is not guessed from an ambiguous `$` sign. Budget checks require a matching explicit currency.
+Every extracted dish retains its source URL, exact printed line, and retrieval timestamp. Gemini extraction is accepted only when its proposed quote exactly appears in the retrieved text and normal code can parse a price from it. Translation is separate and never changes source evidence or deterministic matching fields. An explicit dietary label is only treated as confirmed when the menu is on a verified official restaurant domain. Allergy safety remains unknown unless an allergen appears in the line, in which case the item is marked as a conflict. Printed price currency is not guessed from an ambiguous `$` sign. Budget checks require a matching explicit currency; there is no automatic currency conversion.
 
 ## Checks
 

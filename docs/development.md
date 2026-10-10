@@ -2,15 +2,15 @@
 
 ## Local setup
 
-Use Python 3.12 or 3.13 with `uv` for `backend/`, and Node.js 20.9+ with npm for `frontend/`. Copy `backend/.env.example` to `backend/.env`; set `GOOGLE_PLACES_API_KEY` for restaurant discovery, `TAVILY_API_KEY` for menu/source lookup, and `OPENAI_API_KEY` only for translation. Keep these credentials server-side. Set explicit `CORS_ORIGINS` for the frontend URL.
+Use Python 3.12 or 3.13 with `uv` for `backend/`, and Node.js 20.9+ with npm for `frontend/`. Copy `backend/.env.example` to `backend/.env`; configure `GOOGLE_PLACES_API_KEY`, `TAVILY_API_KEY`, and `GEMINI_API_KEY` for the complete research pipeline. Keep these credentials server-side. Set explicit `CORS_ORIGINS` for the frontend URL.
 
 Run the API from `backend/` with `uv sync --dev` followed by `uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`. Run the frontend from `frontend/` with `npm ci` then `npm run dev`. The frontend base URL is configurable through `NEXT_PUBLIC_API_BASE_URL`; it is not a provider key.
 
 ## API contract
 
-`POST /api/v1/restaurants/search` accepts `query`, `location`, `meal`, `dietary_requirements`, `avoided_ingredients`, `allergies`, `preferred_cuisine`, `max_budget_per_person`, `currency`, `target_language`, and `max_results`. All constraints are optional. The location must be explicit or recognized in query text. Search supports any user-specified location subject to Google Places coverage. The UI uses the companion `POST /api/v1/restaurants/search/stream` endpoint, which emits `progress`, `result`, or `error` server-sent events and can be canceled by closing the request.
+`POST /api/v1/restaurants/search` accepts `query`, `location`, `latitude`, `longitude`, `search_radius_meters`, `meal`, `dietary_requirements`, `avoided_ingredients`, `allergies`, `preferred_cuisine`, `max_budget_per_person`, `currency`, `target_language`, `other_preferences`, and `max_results`. The location is required unless coordinates are supplied. Search supports user-provided locations subject to Google Places and Tavily coverage. Text radius is only a search hint; browser coordinates enable Places location bias and measured-distance filtering. The UI uses the companion `POST /api/v1/restaurants/search/stream` endpoint, which emits `progress`, `result`, or `error` server-sent events and can be canceled by closing the request.
 
-The response has `criteria`, `restaurants`, `warnings`, and `provider_coverage`. Each candidate includes identity and source fields, `verification_status`, `match_status`, `score`, `match_reasons`, `menu_items`, and `unknown_fields`. Menu items carry original text, optional translation, printed price/currency, exact evidence, source URL, and conservative dietary status.
+The response has `criteria`, `restaurants`, `warnings`, and `provider_coverage`. Each candidate includes identity and source fields, `verification_status`, `match_status`, `score`, `match_reasons`, `menu_items`, and `unknown_fields`. Menu items carry original and optional translated names/descriptions, printed price/currency, source evidence and URL, retrieval time, extraction confidence, and conservative dietary/allergen status. `GET /health/providers` reports configured keys only and never makes live calls.
 
 ## Verification commands
 

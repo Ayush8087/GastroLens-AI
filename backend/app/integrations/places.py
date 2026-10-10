@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Protocol
 
@@ -17,6 +18,8 @@ class PlaceRecord:
         website_url: str | None,
         maps_url: str | None,
         business_status: str | None,
+        latitude: float | None = None,
+        longitude: float | None = None,
     ) -> None:
         self.place_id = place_id
         self.name = name
@@ -24,10 +27,18 @@ class PlaceRecord:
         self.website_url = website_url
         self.maps_url = maps_url
         self.business_status = business_status
+        self.latitude = latitude
+        self.longitude = longitude
 
 
 class PlaceSearchProvider(Protocol):
-    async def search_places(self, query: str, *, max_results: int) -> list[PlaceRecord]: ...
+    async def search_places(
+        self,
+        query: str,
+        *,
+        max_results: int,
+        location_bias: dict[str, float] | None = None,
+    ) -> list[PlaceRecord]: ...
 
 
 class PlacesProviderError(Exception):
@@ -44,16 +55,30 @@ class GooglePlacesProvider:
             "places.websiteUri",
             "places.googleMapsUri",
             "places.businessStatus",
+            "places.location",
         )
     )
 
     def __init__(
-        self, api_key: SecretStr | None, *, client: httpx.AsyncClient | None = None
+        self,
+        api_key: SecretStr | None,
+        *,
+        client: httpx.AsyncClient | None = None,
+        attempts: int = 2,
+        retry_delay: float = 0.2,
     ) -> None:
         self.api_key = api_key
         self.client = client
+        self.attempts = max(1, min(attempts, 2))
+        self.retry_delay = max(0.0, min(retry_delay, 1.0))
 
-    async def search_places(self, query: str, *, max_results: int = 10) -> list[PlaceRecord]:
+    async def search_places(
+        self,
+        query: str,
+        *,
+        max_results: int = 10,
+        location_bias: dict[str, float] | None = None,
+    ) -> list[PlaceRecord]:
         if self.api_key is None or not self.api_key.get_secret_value().strip():
             raise PlacesProviderError(
                 "Restaurant discovery is not configured (GOOGLE_PLACES_API_KEY is missing)."
@@ -65,17 +90,56 @@ class GooglePlacesProvider:
             else httpx.AsyncClient(timeout=httpx.Timeout(12.0), trust_env=False)
         )
         try:
-            response = await client.post(
-                self.endpoint,
-                headers={
-                    "X-Goog-Api-Key": self.api_key.get_secret_value(),
-                    "X-Goog-FieldMask": self.field_mask,
-                },
-                json={"textQuery": query, "pageSize": max(1, min(max_results, 20))},
-            )
+            payload: dict[str, object] = {
+                "textQuery": query,
+                "pageSize": max(1, min(max_results, 20)),
+            }
+            if location_bias:
+                payload["locationBias"] = {
+                    "circle": {
+                        "center": {
+                            "latitude": location_bias["latitude"],
+                            "longitude": location_bias["longitude"],
+                        },
+                        "radius": location_bias["radius_meters"],
+                    }
+                }
+            response: httpx.Response | None = None
+            for attempt in range(self.attempts):
+                try:
+                    response = await client.post(
+                        self.endpoint,
+                        headers={
+                            "X-Goog-Api-Key": self.api_key.get_secret_value(),
+                            "X-Goog-FieldMask": self.field_mask,
+                        },
+                        json=payload,
+                    )
+                except httpx.TimeoutException:
+                    if attempt + 1 == self.attempts:
+                        raise
+                    await asyncio.sleep(self.retry_delay * (2**attempt))
+                    continue
+                except httpx.HTTPError:
+                    if attempt + 1 == self.attempts:
+                        raise
+                    await asyncio.sleep(self.retry_delay * (2**attempt))
+                    continue
+                if (
+                    response.status_code == 429
+                    or response.status_code >= 500
+                    or _is_quota_response(response)
+                ) and attempt + 1 < self.attempts:
+                    await asyncio.sleep(self.retry_delay * (2**attempt))
+                    continue
+                break
+            if response is None:
+                raise PlacesProviderError("Restaurant location search is temporarily unavailable.")
+            if response.status_code == 429 or _is_quota_response(response):
+                raise PlacesProviderError("Google Places rate limit or quota was exceeded.")
             if response.status_code in {401, 403}:
                 raise PlacesProviderError("Google Places rejected the configured credentials.")
-            if response.status_code == 429 or response.status_code >= 500:
+            if response.status_code >= 500:
                 raise PlacesProviderError("Restaurant location search is temporarily unavailable.")
             response.raise_for_status()
             payload = response.json()
@@ -103,6 +167,8 @@ class GooglePlacesProvider:
                         website_url=_optional_text(place.get("websiteUri")),
                         maps_url=_optional_text(place.get("googleMapsUri")),
                         business_status=_optional_text(place.get("businessStatus")),
+                        latitude=_coordinate(place.get("location"), "latitude"),
+                        longitude=_coordinate(place.get("location"), "longitude"),
                     )
                 )
             if places and not output:
@@ -130,3 +196,25 @@ class GooglePlacesProvider:
 
 def _optional_text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _coordinate(value: object, key: str) -> float | None:
+    if not isinstance(value, dict):
+        return None
+    coordinate = value.get(key)
+    return float(coordinate) if isinstance(coordinate, (int, float)) else None
+
+
+def _is_quota_response(response: httpx.Response) -> bool:
+    if response.status_code not in {400, 403}:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    status = error.get("status") if isinstance(error, dict) else None
+    return isinstance(status, str) and status.casefold() in {
+        "resource_exhausted",
+        "quota_exceeded",
+    }

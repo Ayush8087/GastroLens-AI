@@ -21,10 +21,10 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
     )
-    openai_api_key: SecretStr | None = None
-    openai_model: str = "gpt-4o-mini"
     tavily_api_key: SecretStr | None = None
     google_places_api_key: SecretStr | None = None
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = Field(default="gemini-3.8-flash", pattern=r"^gemini-[A-Za-z0-9.-]+$")
 
     @field_validator("cors_origins", mode="before")
     @classmethod

@@ -13,11 +13,15 @@ class RestaurantSearchRequest(BaseModel):
 
     query: str | None = Field(default=None, min_length=3, max_length=500)
     location: str | None = Field(default=None, min_length=2, max_length=160)
+    search_radius_meters: int | None = Field(default=None, ge=100, le=50_000)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
     meal: Meal | None = None
     dietary_requirements: list[str] = Field(default_factory=list, max_length=8)
     avoided_ingredients: list[str] = Field(default_factory=list, max_length=30)
     allergies: list[str] = Field(default_factory=list, max_length=20)
     target_language: str | None = Field(default=None, min_length=2, max_length=40)
+    other_preferences: list[str] = Field(default_factory=list, max_length=12)
     preferred_cuisine: str | None = Field(default=None, min_length=1, max_length=80)
     max_budget_per_person: float | None = Field(default=None, gt=0, le=100_000)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
@@ -56,6 +60,8 @@ class RestaurantSearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def parse_obvious_query_constraints(self) -> "RestaurantSearchRequest":
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude and longitude must be provided together")
         if not self.query:
             return self
         folded = self.query.casefold()
@@ -77,7 +83,12 @@ class RestaurantSearchRequest(BaseModel):
                 self.query,
                 re.IGNORECASE,
             )
-            if match and match.group(1).strip().casefold() not in {"the mood", "the area"}:
+            if match and match.group(1).strip().casefold() not in {
+                "the mood",
+                "the area",
+                "me",
+                "here",
+            }:
                 self.location = match.group(1).strip()[:160]
         if self.preferred_cuisine is None:
             cuisine = re.search(r"\b([\w-]{2,40})\s+cuisine\b", self.query, re.IGNORECASE)
@@ -85,7 +96,7 @@ class RestaurantSearchRequest(BaseModel):
                 self.preferred_cuisine = cuisine.group(1)
         if self.max_budget_per_person is None:
             budget = re.search(
-                r"\b(?:under|up to|maximum|max|budget(?: of)?)\s*([$€£])?\s*"
+                r"\b(?:under|up to|maximum|max|budget(?: of)?)\s*([$€£₹])?\s*"
                 r"(\d{1,6}(?:[.,]\d{1,2})?)\s*([A-Z]{3})?\b",
                 self.query,
                 re.IGNORECASE,
@@ -100,6 +111,14 @@ class RestaurantSearchRequest(BaseModel):
                         self.currency = "EUR"
                     elif self.currency is None and budget.group(1) == "£":
                         self.currency = "GBP"
+                    elif self.currency is None and budget.group(1) == "₹":
+                        self.currency = "INR"
+        if self.search_radius_meters is None:
+            radius = re.search(
+                r"\bwithin\s+(\d{1,2}(?:\.\d+)?)\s*(km|kilomet(?:er|re)s?)\b", folded
+            )
+            if radius and 0.1 <= float(radius.group(1)) <= 50:
+                self.search_radius_meters = int(float(radius.group(1)) * 1000)
         if not self.allergies:
             allergy = re.search(
                 r"\ballergic to\s+([\w -]{2,50}?)(?=\s+(?:in|near|around|for|under|with)\b"
@@ -145,14 +164,18 @@ class MenuItem(BaseModel):
     name: str
     original_text: str
     translated_text: str | None = None
+    translated_description: str | None = None
     description: str | None = None
-    price: float | None = None
+    price: float | None = Field(default=None, ge=0, le=1_000_000)
     currency: str | None = None
     section: str | None = None
     source_url: str
     evidence: str
+    evidence_type: Literal["printed_text", "ocr_transcription"] = "printed_text"
+    extraction_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     dietary_status: Literal["confirmed", "contradicted", "unknown"] = "unknown"
+    allergen_status: Literal["conflict", "unknown"] = "unknown"
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -170,6 +193,9 @@ class RestaurantCandidate(BaseModel):
     place_id: str | None = None
     maps_url: str | None = None
     business_status: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    distance_meters: float | None = None
     location_match: Literal["confirmed", "unconfirmed"] = "unconfirmed"
     menu_items: list[MenuItem] = Field(default_factory=list)
     match_status: Literal["exact_match", "partial_match", "uncertain", "excluded"] = "uncertain"

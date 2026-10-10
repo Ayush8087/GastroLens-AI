@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.core.config import Settings, get_settings
+from app.integrations.gemini import GeminiResearchProvider
 from app.integrations.places import GooglePlacesProvider
 from app.integrations.tavily_search import TavilySearchProvider
-from app.integrations.translation import OpenAITranslationProvider
 from app.schemas.restaurant_search import RestaurantSearchRequest, RestaurantSearchResponse
 from app.services.menu_research import MenuResearchService
 from app.services.restaurant_discovery import RestaurantDiscoveryService
@@ -22,15 +22,16 @@ router = APIRouter(prefix="/api/v1/restaurants", tags=["restaurants"])
 def get_discovery_service(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> RestaurantDiscoveryService:
+    gemini = GeminiResearchProvider(
+        settings.gemini_api_key,
+        model=settings.gemini_model,
+    )
     return RestaurantDiscoveryService(
         search_provider=TavilySearchProvider(settings.tavily_api_key),
         verifier=SourceVerifier(),
         places_provider=GooglePlacesProvider(settings.google_places_api_key),
-        menu_researcher=MenuResearchService(
-            translator=OpenAITranslationProvider(
-                settings.openai_api_key, model=settings.openai_model
-            )
-        ),
+        menu_researcher=MenuResearchService(translator=gemini, extractor=gemini),
+        request_interpreter=gemini,
     )
 
 
