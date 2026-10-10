@@ -1,6 +1,6 @@
 # GastroLens-AI
 
-Production-minded monorepo foundation for an AI restaurant research agent for European travellers. The initial product scope is Barcelona and vegetarian-friendly meals. Restaurant discovery and AI workflows are intentionally not implemented yet.
+Production-minded monorepo for an AI restaurant research agent for European travellers. The initial scope is restaurant discovery in Barcelona, with vegetarian as the default dietary requirement. The backend search feature uses Tavily and retains source evidence and uncertainty; menu parsing, review analysis, ranking, and the frontend workflow remain future work.
 
 ## Repository layout
 
@@ -11,8 +11,8 @@ backend/                  FastAPI service and Python tests
   app/core/                Settings, validation, logging
   app/db/                  SQLAlchemy base and future persistence
   app/integrations/        Replaceable external provider boundaries
-  app/schemas/             API request/response schemas
-  app/services/            Application use cases (future)
+  app/schemas/             Validated API request/response schemas
+  app/services/            Discovery use case and source verification
   tests/                   Pytest coverage
 docs/                      Architecture, assumptions, limitations
 ```
@@ -27,6 +27,8 @@ docs/                      Architecture, assumptions, limitations
 
 Copy `backend/.env.example` to `backend/.env` and `frontend/.env.example` to `frontend/.env.local` if needed. The examples contain placeholders only. Keep real credentials out of Git. `OPENAI_API_KEY` and `TAVILY_API_KEY` are backend-only settings and are never exposed to the browser.
 
+Restaurant search requires `TAVILY_API_KEY`. Other relevant backend settings are `APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, and `CORS_ORIGINS`. Search returns an empty restaurant list with a warning if Tavily is not configured or unavailable; it never substitutes sample results.
+
 ## Run locally
 
 Backend, from `backend/`:
@@ -37,6 +39,22 @@ uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 The health endpoint is `GET http://127.0.0.1:8000/health`; OpenAPI docs are at `/docs` in development.
+
+Search restaurants with `POST http://127.0.0.1:8000/api/v1/restaurants/search`:
+
+```json
+{
+  "city": "Barcelona",
+  "meal": "dinner",
+  "dietary_requirements": ["vegetarian"],
+  "preferred_cuisine": "Catalan",
+  "max_budget_per_person": 35,
+  "currency": "EUR",
+  "max_results": 8
+}
+```
+
+The response contains `criteria`, `restaurants`, and `warnings`. Each restaurant includes available identity fields, source evidence with retrieval timestamps and accessibility results, a verification status, explicit unknown fields, and `dietary_suitability: "unconfirmed"`. For the response model and failure behavior, see [development documentation](docs/development.md).
 
 Frontend, from `frontend/`:
 
@@ -67,4 +85,4 @@ Set `frontend/` as the Vercel project root. Deploy `backend/` as a Python ASGI a
 
 ## Scope and known limitations
 
-This repository contains the project foundation only. Restaurant discovery, identity verification, menu and review extraction, evidence-backed ranking, and citation APIs remain to be designed and implemented. The health endpoint checks process liveness only; it does not check PostgreSQL or provider availability. See [architecture](docs/architecture.md), [assumptions](docs/assumptions.md), [limitations](docs/limitations.md), and [development](docs/development.md) for decisions and validation notes.
+The first discovery and source-verification API is implemented. It does not parse menus, confirm vegetarian suitability, analyze reviews, rank restaurants, or persist results. Source accessibility and name matching are limited evidence, not proof of business ownership or current restaurant operations. The health endpoint checks process liveness only; it does not check PostgreSQL or provider availability. See [architecture](docs/architecture.md), [assumptions](docs/assumptions.md), [limitations](docs/limitations.md), and [development](docs/development.md).
