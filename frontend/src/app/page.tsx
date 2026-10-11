@@ -245,6 +245,11 @@ export default function Home() {
         </div>
       </section>
 
+      <div className="trust-strip" aria-label="How GastroLens research works">
+        <span>REAL MENUS</span><i>✳</i><span>SOURCES ATTACHED</span><i>✳</i><span>DISH-LEVEL CHECKS</span><i>✳</i><span>UNKNOWNS STAY UNKNOWN</span>
+      </div>
+      <div className="food-ticker" aria-label="A world of food to explore"><div><span>DOSA</span><b>✳</b><span>RAMEN</span><b>✳</b><span>TACOS</span><b>✳</b><span>PHO</span><b>✳</b><span>BIRYANI</span><b>✳</b><span>FALAFEL</span><b>✳</b><span>DOSA</span><b>✳</b><span>RAMEN</span><b>✳</b><span>TACOS</span><b>✳</b><span>PHO</span><b>✳</b><span>BIRYANI</span><b>✳</b><span>FALAFEL</span><b>✳</b></div></div>
+
       <section className="approach-strip" id="how-it-works" aria-label="How GastroLens researches restaurants">
         <span className="method-label">OUR RECIPE</span>
         <div><span className="approach-number">01</span><span><strong>Find real restaurants</strong><small>Listings from configured providers</small></span></div>
@@ -308,8 +313,9 @@ function researchStep(progress: string) {
 
 function FoodArt() {
   return <>
-    <svg className="art-plate" viewBox="0 0 340 340"><circle cx="170" cy="170" r="155" fill="#f9fbff"/><circle cx="170" cy="170" r="118" fill="#dbeafa"/><circle cx="170" cy="170" r="91" fill="#fff"/><path d="M117 183c10-41 50-64 89-45 32 16 42 50 17 73-18 17-40 11-49-4-10-17-1-36 17-40m-60 66c22 9 39 3 50-11m-39-97c6 13 17 18 29 17" fill="none" stroke="#f58237" strokeWidth="12" strokeLinecap="round"/><path d="M136 128l-8-14m27 3-2-17m22 21 7-14m-48 104-13 9m65 10 7 14" stroke="#a9cd37" strokeWidth="9" strokeLinecap="round"/><path d="M251 53l14-24m-1 45 29-4m-47-24-20-17" stroke="#fff" strokeWidth="5" strokeLinecap="round"/></svg>
-    <svg className="art-spark" viewBox="0 0 100 100"><path d="M50 3l9 33 32-15-23 28 29 17-35-3-4 34-12-32-30 16 21-29L7 35l34 8z" fill="#c5e84b"/></svg>
+    <svg className="art-plate" viewBox="0 0 340 340"><circle cx="170" cy="170" r="155" fill="#fff8ef"/><circle cx="170" cy="170" r="118" fill="#f5e4cf"/><circle cx="170" cy="170" r="91" fill="#fffdf8"/><path d="M117 183c10-41 50-64 89-45 32 16 42 50 17 73-18 17-40 11-49-4-10-17-1-36 17-40m-60 66c22 9 39 3 50-11m-39-97c6 13 17 18 29 17" fill="none" stroke="#e8452c" strokeWidth="12" strokeLinecap="round"/><path d="M136 128l-8-14m27 3-2-17m22 21 7-14m-48 104-13 9m65 10 7 14" stroke="#668842" strokeWidth="9" strokeLinecap="round"/><circle cx="203" cy="135" r="7" fill="#f5b722"/><circle cx="218" cy="149" r="5" fill="#f5b722"/><path d="M251 53l14-24m-1 45 29-4m-47-24-20-17" stroke="#fff8ef" strokeWidth="5" strokeLinecap="round"/></svg>
+    <svg className="art-spark" viewBox="0 0 100 100"><path d="M50 3l9 33 32-15-23 28 29 17-35-3-4 34-12-32-30 16 21-29L7 35l34 8z" fill="#f5b722"/></svg>
+    <span className="art-ingredient art-tomato">✳</span><span className="art-ingredient art-leaf">❧</span><span className="art-ingredient art-lemon">◒</span>
     <span className="art-caption">GOOD THINGS<br />ON THE MENU</span>
   </>;
 }
