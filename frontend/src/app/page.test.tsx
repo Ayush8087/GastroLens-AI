@@ -9,6 +9,69 @@ afterEach(() => {
 });
 
 describe("restaurant search experience", () => {
+  it("turns an example search into editable criteria and submits those criteria", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ restaurants: [], warnings: [], provider_coverage: "" }),
+    } as Response);
+    render(<Home />);
+
+    fireEvent.click(screen.getByRole("button", { name: /something green, somewhere quiet/i }));
+    expect(screen.getByLabelText("What are you hungry for?")).toHaveValue(
+      "Vegetarian food somewhere calm",
+    );
+    expect(screen.getByRole("radio", { name: "Dinner" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getAllByText("Vegetarian").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /find restaurants/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      query: "Vegetarian food somewhere calm",
+      meal: "dinner",
+      dietary_requirements: ["Vegetarian"],
+      other_preferences: ["Quiet atmosphere"],
+    });
+  });
+
+  it("clears entered criteria from the filter controls", () => {
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("LOCATION"), { target: { value: "Kyoto" } });
+    fireEvent.click(screen.getByRole("button", { name: /clear all/i }));
+
+    expect(screen.getByLabelText("LOCATION")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: /clear all/i })).not.toBeInTheDocument();
+  });
+
+  it("supports keyboard meal selection and toggles dietary quick filters", () => {
+    render(<Home />);
+    const dinner = screen.getByRole("radio", { name: "Dinner" });
+    fireEvent.keyDown(dinner, { key: "ArrowLeft" });
+    expect(screen.getByRole("radio", { name: "Supper" })).toHaveAttribute("aria-checked", "true");
+
+    const vegan = screen.getByRole("button", { name: /vegan/i });
+    fireEvent.click(vegan);
+    expect(vegan).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(vegan);
+    expect(vegan).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("shows live research animation and backend progress while the request is pending", async () => {
+    let finishRequest!: (response: Response) => void;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise((resolve) => { finishRequest = resolve; }));
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("LOCATION"), { target: { value: "Kyoto" } });
+    fireEvent.click(screen.getByRole("button", { name: /find restaurants/i }));
+
+    expect(await screen.findByText("We’re on the case")).toBeInTheDocument();
+    expect(screen.getByText("LIVE RESEARCH")).toBeInTheDocument();
+    expect(screen.getByText("Preparing your restaurant research")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /cancel search/i })).toBeInTheDocument();
+    finishRequest({ ok: true, headers: new Headers({ "content-type": "application/json" }), json: async () => ({ restaurants: [], warnings: [], provider_coverage: "" }) } as Response);
+    expect(await screen.findByText("No places found yet")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("submits the user's location and displays real API results with uncertainty", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
@@ -48,7 +111,7 @@ describe("restaurant search experience", () => {
     } as Response);
     render(<Home />);
     fireEvent.change(screen.getByLabelText("LOCATION"), { target: { value: "Kyoto" } });
-    const dietaryInput = screen.getByRole("combobox", { name: "DIETARY NEEDS" });
+    const dietaryInput = screen.getByRole("combobox", { name: "Add another dietary need" });
     fireEvent.change(dietaryInput, { target: { value: "vegetarian" } });
     fireEvent.keyDown(dietaryInput, { key: "Enter" });
     fireEvent.click(screen.getByRole("button", { name: /find restaurants/i }));
@@ -120,8 +183,8 @@ describe("restaurant search experience", () => {
     } as Response);
     render(<Home />);
     fireEvent.change(screen.getByLabelText("LOCATION"), { target: { value: "Timbuktu Township" } });
-    fireEvent.change(screen.getByLabelText("What would make it a great meal?"), { target: { value: "Find a place for brunch" } });
-    fireEvent.change(screen.getByLabelText("Meal"), { target: { value: "brunch" } });
+    fireEvent.change(screen.getByLabelText("What are you hungry for?"), { target: { value: "Find a place for brunch" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Brunch" }));
 
     const cuisines = screen.getByRole("combobox", { name: "CUISINES" });
     fireEvent.change(cuisines, { target: { value: "Maharashtrian" } });
@@ -129,7 +192,7 @@ describe("restaurant search experience", () => {
     fireEvent.change(cuisines, { target: { value: "Assamese" } });
     fireEvent.keyDown(cuisines, { key: "Enter" });
 
-    const diets = screen.getByRole("combobox", { name: "DIETARY NEEDS" });
+    const diets = screen.getByRole("combobox", { name: "Add another dietary need" });
     fireEvent.change(diets, { target: { value: "Vegan" } });
     fireEvent.keyDown(diets, { key: "Enter" });
     fireEvent.change(diets, { target: { value: "High-protein" } });
@@ -137,7 +200,8 @@ describe("restaurant search experience", () => {
 
     fireEvent.change(screen.getByLabelText("MAXIMUM PER PERSON"), { target: { value: "450" } });
     fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "INR" } });
-    fireEvent.click(screen.getByText(/More filters/));
+    fireEvent.click(screen.getByText(/More preferences/));
+    fireEvent.click(screen.getByText(/Allergies & ingredients/));
     const allergy = screen.getByRole("combobox", { name: "ALLERGIES" });
     fireEvent.change(allergy, { target: { value: "tree nuts" } });
     fireEvent.keyDown(allergy, { key: "Enter" });

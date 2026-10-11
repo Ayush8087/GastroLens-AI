@@ -30,11 +30,29 @@ type SearchResponse = {
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 const promptExamples = [
-  "A relaxed dinner with vegan options and outdoor seating",
-  "A quiet lunch with regional food and good value",
-  "A family-friendly place with gluten-free choices",
+  { label: "Something green, somewhere quiet", query: "Vegetarian food somewhere calm", meal: "dinner", dietary: ["Vegetarian"], cuisines: [], preferences: ["Quiet atmosphere"] },
+  { label: "Spicy Indian food tonight", query: "Spicy Indian food for dinner", meal: "dinner", dietary: [], cuisines: ["Indian"], preferences: [] },
+  { label: "A cozy dinner for two", query: "A cozy dinner for two", meal: "dinner", dietary: [], cuisines: [], preferences: ["Romantic atmosphere"], partySize: "2" },
+  { label: "A bright, unhurried brunch", query: "A relaxed brunch with fresh, seasonal food", meal: "brunch", dietary: [], cuisines: [], preferences: ["Quiet atmosphere"] },
+  { label: "Gluten-free food, my kind of budget", query: "Gluten-free dishes within my budget", meal: "", dietary: ["Gluten-free"], cuisines: [], preferences: [] },
+  { label: "Something local and new", query: "Find a local specialty I have not tried before", meal: "", dietary: [], cuisines: [], preferences: [] },
 ];
-const dietOptions = ["Vegetarian", "Vegan", "Non-vegetarian", "Pescatarian", "Eggetarian", "Gluten-free", "Dairy-free", "Lactose-free", "Keto", "Low-carb", "High-protein", "Jain"];
+const dietOptions = ["Vegetarian", "Vegan", "Non-vegetarian", "Pescatarian", "Eggetarian", "Gluten-free", "Dairy-free", "Egg-free", "Halal", "Kosher", "Jain", "Lactose-free", "Keto", "Low-carb", "High-protein"];
+const mealOptions = [
+  { label: "Any meal", value: "", glyph: "✳" },
+  { label: "Breakfast", value: "breakfast", glyph: "☀" },
+  { label: "Brunch", value: "brunch", glyph: "◒" },
+  { label: "Lunch", value: "lunch", glyph: "◉" },
+  { label: "Supper", value: "supper", glyph: "◷" },
+  { label: "Dinner", value: "dinner", glyph: "☾" },
+];
+const quickDietOptions = [
+  { label: "Vegetarian", glyph: "◉" }, { label: "Vegan", glyph: "✳" },
+  { label: "Non-vegetarian", glyph: "◧" }, { label: "Pescatarian", glyph: "≈" },
+  { label: "Gluten-free", glyph: "GF" }, { label: "Dairy-free", glyph: "DF" },
+  { label: "Egg-free", glyph: "EF" }, { label: "Halal", glyph: "H" },
+  { label: "Kosher", glyph: "K" }, { label: "Jain", glyph: "J" },
+];
 const cuisineOptions = ["Italian", "Indian", "Chinese", "Japanese", "Korean", "Thai", "Mexican", "Mediterranean", "Middle Eastern", "American", "French", "Spanish", "Vietnamese", "Lebanese", "Continental", "Street food"];
 const preferenceOptions = ["Quiet atmosphere", "Outdoor seating", "Good for groups", "Wheelchair accessibility", "Good value", "Near public transport", "Laptop-friendly", "Romantic atmosphere"];
 const currencies = ["INR", "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "SGD", "AED", "NZD", "ZAR"];
@@ -62,6 +80,20 @@ export default function Home() {
   const activeRequest = useRef<AbortController | null>(null);
 
   const advancedCount = allergies.length + avoided.length + preferences.length + (language ? 1 : 0) + (partySize ? 1 : 0) + (radius ? 1 : 0);
+  const hasSearchCriteria = Boolean(query.trim() || location.trim() || coordinates || meal || cuisines.length || dietary.length || budget || currency || advancedCount);
+  const activeSummary = [
+    query.trim() ? `Request: ${query.trim()}` : "",
+    location.trim() || (coordinates ? "Current location" : ""),
+    meal,
+    ...cuisines,
+    ...dietary,
+    ...allergies.map((value) => `Allergy: ${value}`),
+    ...avoided.map((value) => `Avoid: ${value}`),
+    ...(budget ? [`Up to ${currency ? `${currency} ` : ""}${budget} per person`] : []),
+    ...preferences,
+    ...(partySize ? [`${partySize} diners`] : []),
+    ...(language ? [`Translate to ${language}`] : []),
+  ].filter(Boolean);
 
   async function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -161,61 +193,99 @@ export default function Home() {
     );
   }
 
-  function setExample(value: string) {
-    setQuery(value);
+  function setExample(example: (typeof promptExamples)[number]) {
+    setQuery(example.query);
+    setMeal(example.meal);
+    setDietary(example.dietary);
+    setCuisines(example.cuisines);
+    setPreferences(example.preferences);
+    setPartySize(example.partySize || "");
     document.getElementById("query")?.focus();
+  }
+
+  function handleMealKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex = index;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (index + 1) % mealOptions.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (index - 1 + mealOptions.length) % mealOptions.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = mealOptions.length - 1;
+    else return;
+    event.preventDefault();
+    setMeal(mealOptions[nextIndex].value);
+    document.getElementById(`meal-${nextIndex}`)?.focus();
+  }
+
+  function clearAll() {
+    setQuery(""); setLocation(""); setCoordinates(null); setLocationMessage("");
+    setRadius(""); setMeal(""); setCuisines([]); setDietary([]); setBudget("");
+    setCurrency(""); setAllergies([]); setAvoided([]); setPreferences([]);
+    setLanguage(""); setPartySize(""); setResult(null); setError("");
+  }
+
+  function editSearch() {
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+    document.getElementById("search")?.scrollIntoView({ behavior, block: "start" });
+    document.getElementById("query")?.focus({ preventScroll: true });
   }
 
   return (
     <main className="app-shell">
       <header className="topbar" id="top">
-        <a className="brand" href="#top" aria-label="GastroLens home"><span className="brand-mark">G</span><span>gastrolens<span className="brand-ai">.ai</span></span></a>
-        <span className="top-note"><span className="live-dot" /> Evidence-led restaurant research</span>
+        <a className="brand" href="#top" aria-label="GastroLens home"><span className="brand-mark">g</span><span>GastroLens<span className="brand-ai"> / field notes</span></span></a>
+        <nav className="site-nav" aria-label="Main navigation"><a href="#how-it-works">The method</a><a href="#search">Search</a><a className="nav-cta" href="#search">Find a table <span aria-hidden="true">↗</span></a></nav>
       </header>
 
-      <section className="intro">
-        <div className="eyebrow"><span className="eyebrow-line" /> A BETTER TABLE STARTS WITH BETTER RESEARCH</div>
-        <h1>Tell us what<br /><em>you’re craving.</em></h1>
-        <p className="intro-copy">Search any destination in your own words. Add the details that matter, and explore real listings with menus and evidence attached.</p>
+      <section className="hero" aria-labelledby="hero-title">
+        <div className="hero-meta"><span>INDEPENDENT FOOD RESEARCH</span><span>ISSUE 01 <i>·</i> MADE FOR YOUR APPETITE</span></div>
+        <div className="hero-copy">
+          <h1 id="hero-title">Eat well.<br /><span className="headline-mark">Know why.</span></h1>
+          <p className="intro-copy">GastroLens finds real restaurants, reads actual menus, and checks individual dishes against what matters to you.</p>
+          <div className="hero-links"><a className="hero-cta" href="#search"><span aria-hidden="true">⌕</span> Find my table <b aria-hidden="true">↘</b></a><span className="hero-note">No made-up menus.<br />No mystery ingredients.</span></div>
+          <div className="food-illustrations" aria-hidden="true"><FoodArt /></div>
+        </div>
       </section>
 
-      <section className="search-panel" aria-label="Restaurant search">
-        <form onSubmit={submitSearch}>
-          <div className="search-panel-head"><div><span className="step-kicker">YOUR SEARCH</span><label className="field-label" htmlFor="query">What would make it a great meal?</label></div><span className="optional-label">Natural language works best</span></div>
-          <textarea id="query" maxLength={500} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the meal, place, or atmosphere you have in mind…" rows={3} />
-          <div className="prompt-examples" aria-label="Example prompts"><span>Try a prompt</span>{promptExamples.map((example) => <button type="button" key={example} onClick={() => setExample(example)}>{example}</button>)}</div>
+      <section className="approach-strip" id="how-it-works" aria-label="How GastroLens researches restaurants">
+        <span className="method-label">OUR RECIPE</span>
+        <div><span className="approach-number">01</span><span><strong>Find real restaurants</strong><small>Listings from configured providers</small></span></div>
+        <div><span className="approach-number">02</span><span><strong>Read the actual menu</strong><small>Sources stay attached</small></span></div>
+        <div><span className="approach-number">03</span><span><strong>Check every dish</strong><small>Unknowns stay unknown</small></span></div>
+        <div><span className="approach-number">04</span><span><strong>Rank with reasons</strong><small>Evidence before enthusiasm</small></span></div>
+      </section>
 
-          <div className="filters-heading"><div><span className="step-kicker">MAKE IT YOURS</span><h2>Choose your filters</h2></div><span className="optional-label">Every field is optional</span></div>
+      <section className="search-panel" aria-label="Restaurant search" id="search">
+        <form onSubmit={submitSearch}>
+          <div className="search-panel-head"><div><span className="step-kicker">YOUR TABLE, YOUR TERMS</span><label className="field-label" htmlFor="query">What are you hungry for?</label></div><span className="order-note">RESEARCH NOTE <b>№ 01</b></span></div>
+          <textarea id="query" maxLength={500} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe the meal, place, or atmosphere you have in mind…" rows={3} />
+          <div className="prompt-examples" aria-label="Example searches"><span>NEED A STARTING POINT? PICK A NOTE</span>{promptExamples.map((example, index) => <button type="button" key={example.label} onClick={() => setExample(example)}><i aria-hidden="true">0{index + 1}</i>{example.label}<span aria-hidden="true"> ↗</span></button>)}</div>
+
+          <div className="filters-heading"><div><span className="step-kicker">MAKE IT YOURS</span><h2>Choose your filters</h2></div><div className="filter-tools"><span className="optional-label">Every field is optional</span>{hasSearchCriteria && <button type="button" className="clear-button" onClick={clearAll}>Clear all</button>}</div></div>
           <div className="filter-grid">
-            <div className="filter-field location-field"><label htmlFor="location">LOCATION <span>Any city or address</span></label><input id="location" aria-label="LOCATION" maxLength={160} autoComplete="off" value={location} onChange={(event) => { setLocation(event.target.value); setCoordinates(null); setLocationMessage(""); }} placeholder="City, locality, region, or country" /><button className="inline-action" type="button" onClick={useCurrentLocation}>◎ Use my location</button>{locationMessage && <small role="status">{locationMessage}</small>}</div>
-            <label className="filter-field">MEAL <span>When are you going?</span><select aria-label="Meal" value={meal} onChange={(event) => setMeal(event.target.value)}><option value="">Any meal</option><option value="breakfast">Breakfast</option><option value="brunch">Brunch</option><option value="lunch">Lunch</option><option value="supper">Supper</option><option value="dinner">Dinner</option></select></label>
+            <div className="filter-field location-field"><label htmlFor="location">LOCATION <span>Any city, area, region, or country</span></label><div className="location-control"><span aria-hidden="true">⌖</span><input id="location" aria-label="LOCATION" maxLength={160} autoComplete="off" value={location} onChange={(event) => { setLocation(event.target.value); setCoordinates(null); setLocationMessage(""); }} placeholder="Where are you eating?" />{(location || coordinates) && <button type="button" aria-label="Clear location" onClick={() => { setLocation(""); setCoordinates(null); setLocationMessage(""); }}>×</button>}</div><button className="inline-action" type="button" onClick={useCurrentLocation}>◎ Use my location</button>{locationMessage && <small role="status">{locationMessage}</small>}</div>
+            <div className="filter-field meal-field"><div><label>MEAL</label><span className="field-hint">Pick a time of day</span></div><div className="meal-tiles" role="radiogroup" aria-label="Meal">{mealOptions.map((option, index) => <button id={`meal-${index}`} type="button" role="radio" aria-label={option.label} aria-checked={meal === option.value} tabIndex={meal === option.value ? 0 : -1} className={meal === option.value ? "meal-tile is-selected" : "meal-tile"} key={option.label} onClick={() => setMeal(option.value)} onKeyDown={(event) => handleMealKeyDown(event, index)}><span className="meal-glyph" aria-hidden="true">{option.glyph}</span><span>{option.label}</span></button>)}</div></div>
             <div className="filter-field"><TagPicker label="CUISINES" hint="Choose any number or add your own" values={cuisines} options={cuisineOptions} placeholder="Search or add a cuisine" maxValues={8} maxEntryLength={80} onChange={setCuisines} /></div>
-            <div className="filter-field"><TagPicker label="DIETARY NEEDS" hint="Each requirement is evaluated separately" values={dietary} options={dietOptions} placeholder="Search or add a requirement" maxValues={8} maxEntryLength={50} onChange={setDietary} /></div>
+            <div className="filter-field diet-field"><div><label>DIETARY NEEDS</label><span className="field-hint">Choose all that apply. Suitability is checked dish by dish.</span></div><div className="quick-diets">{quickDietOptions.map((option) => <button type="button" key={option.label} aria-pressed={dietary.includes(option.label)} disabled={!dietary.includes(option.label) && dietary.length >= 8} className={dietary.includes(option.label) ? "diet-chip is-selected" : "diet-chip"} onClick={() => setDietary(dietary.includes(option.label) ? dietary.filter((value) => value !== option.label) : [...dietary, option.label])}><span aria-hidden="true">{option.glyph}</span>{option.label}{dietary.includes(option.label) && <b aria-hidden="true">✓</b>}</button>)}</div><TagPicker label="Add another dietary need" hint="Search or enter a custom requirement" values={dietary.filter((item) => !quickDietOptions.some((option) => option.label === item))} options={dietOptions.filter((item) => !dietary.includes(item))} placeholder="Search or add another" maxValues={Math.max(0, 8 - dietary.filter((item) => quickDietOptions.some((option) => option.label === item)).length)} maxEntryLength={50} onChange={(customValues) => setDietary([...dietary.filter((item) => quickDietOptions.some((option) => option.label === item)), ...customValues])} /></div>
             <div className="filter-field"><label htmlFor="budget">MAXIMUM PER PERSON <span>Menu price ceiling</span></label><div className="budget-row"><input id="budget" aria-label="MAXIMUM PER PERSON" type="number" min="0.01" max="100000" step="0.01" value={budget} onChange={(event) => setBudget(event.target.value)} placeholder="Any budget" /><input aria-label="Currency" list="currency-options" maxLength={3} value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase())} placeholder="Currency" /><datalist id="currency-options">{currencies.map((code) => <option key={code} value={code} />)}</datalist></div></div>
             <details className="advanced-filters">
-              <summary><span className="summary-plus">＋</span><span><strong>More filters</strong><small>Allergies, ingredients, atmosphere and more</small></span>{advancedCount > 0 && <span className="active-count">{advancedCount} active</span>}</summary>
-              <div className="advanced-grid">
-                <div className="filter-field"><TagPicker label="ALLERGIES" hint="Unknown status is never considered safe" values={allergies} options={[]} placeholder="Type an allergen and press Enter" maxValues={20} maxEntryLength={70} onChange={setAllergies} /></div>
-                <div className="filter-field"><TagPicker label="INGREDIENTS TO AVOID" hint="Enter any ingredient or preparation" values={avoided} options={[]} placeholder="Type an ingredient and press Enter" maxValues={30} maxEntryLength={70} onChange={setAvoided} /></div>
-                <div className="filter-field advanced-span"><TagPicker label="ATMOSPHERE & OTHER PREFERENCES" hint="These may be sent as search hints, not verified facts" values={preferences} options={preferenceOptions} placeholder="Search or add a preference" maxValues={12} maxEntryLength={70} onChange={setPreferences} /></div>
-                <label className="filter-field">SEARCH RADIUS <span>Exact radius needs current location</span><input aria-label="SEARCH RADIUS" type="number" min="100" max="50000" step="100" value={radius} onChange={(event) => setRadius(event.target.value)} placeholder={coordinates ? "5,000 m default" : "Optional · metres"} /></label>
-                <label className="filter-field">PARTY SIZE <span>Number of diners</span><input aria-label="PARTY SIZE" type="number" min="1" max="50" value={partySize} onChange={(event) => setPartySize(event.target.value)} placeholder="Optional" /></label>
-                <label className="filter-field">TRANSLATE MENU TO <span>Original text stays visible</span><input aria-label="TRANSLATE MENU TO" value={language} onChange={(event) => setLanguage(event.target.value)} placeholder="Any language" /></label>
-              </div>
-              <p className="safety-note"><span>!</span> Menu data can be incomplete. This research cannot guarantee allergen safety. Confirm allergies directly with the restaurant before ordering.</p>
+              <summary><span className="summary-plus">＋</span><span><strong>More preferences</strong><small>Allergies, ingredients, dining style, party and language</small></span>{advancedCount > 0 && <span className="active-count">{advancedCount} active</span>}</summary>
+              <details className="advanced-group"><summary>Allergies &amp; ingredients <span>Tell us what must be avoided</span></summary><div className="advanced-grid"><div className="filter-field"><TagPicker label="ALLERGIES" hint="Unknown status is never considered safe" values={allergies} options={[]} placeholder="Type an allergen and press Enter" maxValues={20} maxEntryLength={70} onChange={setAllergies} /></div><div className="filter-field"><TagPicker label="INGREDIENTS TO AVOID" hint="Enter any ingredient or preparation" values={avoided} options={[]} placeholder="Type an ingredient and press Enter" maxValues={30} maxEntryLength={70} onChange={setAvoided} /></div></div><p className="safety-note"><span>!</span> Menu data can be incomplete. This research cannot guarantee allergen safety. Confirm allergies directly with the restaurant before ordering.</p></details>
+              <details className="advanced-group"><summary>Dining preferences <span>Atmosphere and accessibility hints</span></summary><div className="advanced-grid"><div className="filter-field advanced-span"><TagPicker label="ATMOSPHERE & OTHER PREFERENCES" hint="These may be sent as search hints, not verified facts" values={preferences} options={preferenceOptions} placeholder="Search or add a preference" maxValues={12} maxEntryLength={70} onChange={setPreferences} /></div></div></details>
+              <details className="advanced-group"><summary>Your table <span>Party size and search radius</span></summary><div className="advanced-grid"><label className="filter-field">SEARCH RADIUS <span>Exact radius needs current location</span><input aria-label="SEARCH RADIUS" type="number" min="100" max="50000" step="100" value={radius} onChange={(event) => setRadius(event.target.value)} placeholder={coordinates ? "5,000 m default" : "Optional · metres"} /></label><label className="filter-field">PARTY SIZE <span>Number of diners</span><input aria-label="PARTY SIZE" type="number" min="1" max="50" value={partySize} onChange={(event) => setPartySize(event.target.value)} placeholder="Optional" /></label></div></details>
+              <details className="advanced-group"><summary>Language <span>Keep original menu text alongside translation</span></summary><div className="advanced-grid"><label className="filter-field">TRANSLATE MENU TO <span>Original text stays visible</span><input aria-label="TRANSLATE MENU TO" value={language} onChange={(event) => setLanguage(event.target.value)} placeholder="Any language" /></label></div></details>
             </details>
           </div>
 
+          {activeSummary.length > 0 && <div className="active-summary"><span className="active-label">YOUR SEARCH INCLUDES</span><div>{activeSummary.map((value, index) => <span key={`${value}-${index}`} className="summary-chip">{value}</span>)}</div></div>}
           <p className="filter-precedence">Selected filters take precedence over conflicting details in your description.</p>
           <div className="form-footer"><span className="privacy-note"><span aria-hidden="true">◈</span> Your selections are sent to configured research providers</span><button className="submit-button" type="submit" disabled={loading || (!query.trim() && !location.trim() && !coordinates)}>{loading ? <><span className="button-spinner" /> Researching</> : <>Find restaurants <span aria-hidden="true">↗</span></>}</button></div>
         </form>
       </section>
 
-      {loading && <section className="status-panel" role="status"><span className="loader-ring" /><div><strong>Researching your request</strong><p>{progress}</p></div><button type="button" className="inline-action cancel-action" onClick={cancelSearch}>Cancel search</button></section>}
+      {loading && <><section className="status-panel" role="status" aria-live="polite"><div className="research-orbit" aria-hidden="true"><span /><i /><b /></div><div className="research-progress"><div className="research-title"><div><strong>We’re on the case</strong><p>{progress || "Preparing your restaurant research"}</p></div><span className="live-tag"><i /> LIVE RESEARCH</span></div><div className="research-steps">{["Find places", "Check sources", "Read menus", "Match dishes"].map((step, index) => <span key={step} className={index <= researchStep(progress) ? "research-step is-active" : "research-step"}><i>{index < researchStep(progress) ? "✓" : `0${index + 1}`}</i>{step}</span>)}</div></div><button type="button" className="inline-action cancel-action" onClick={cancelSearch}>Cancel search</button></section><div className="skeleton-list" aria-hidden="true"><div className="skeleton-card"><i /><span /><span /><b /></div><div className="skeleton-card"><i /><span /><span /><b /></div></div></>}
       {error && <section className="notice error-notice" role="alert"><span>!</span><div><strong>We couldn’t complete that search.</strong><p>{error}</p><button className="inline-action" onClick={(event) => { event.preventDefault(); document.querySelector<HTMLFormElement>("form")?.requestSubmit(); }}>Try again ↗</button></div></section>}
 
-      {result && <section className="results" aria-live="polite">
-        <div className="results-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> RESEARCH RESULTS</div><h2>{result.restaurants.length ? `${result.restaurants.length} places to explore` : "No places found yet"}</h2></div><span className="results-count">{result.restaurants.length} {result.restaurants.length === 1 ? "result" : "results"}</span></div>
+      {result && <section className="results" aria-live="polite" id="results">
+        <div className="results-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> YOUR RESEARCH</div><h2>{result.restaurants.length ? `${result.restaurants.length} places to explore` : "No places found yet"}</h2></div><div className="results-actions"><span className="results-count">{result.restaurants.length} {result.restaurants.length === 1 ? "result" : "results"}</span><button type="button" className="edit-search" onClick={editSearch}>Edit search ↗</button></div></div>
         {result.warnings.map((warning) => <div className="notice warning-notice" key={warning}><span>i</span><p>{warning}</p></div>)}
         {!result.restaurants.length && <div className="empty-state"><span>⌕</span><strong>No places to show for this search.</strong><p>Try a broader location or adjust your filters. If a provider is not configured, its warning appears above.</p></div>}
         <div className="result-list">{result.restaurants.map((restaurant, index) => <RestaurantCard key={restaurant.place_id || restaurant.restaurant_name || index} restaurant={restaurant} index={index + 1} allergies={result.criteria?.allergies || []} />)}</div>
@@ -226,6 +296,22 @@ export default function Home() {
       <footer><span>gastrolens.ai</span><span>Research with receipts.</span></footer>
     </main>
   );
+}
+
+function researchStep(progress: string) {
+  const stage = progress.toLocaleLowerCase();
+  if (stage.includes("matching") || stage.includes("ranking")) return 3;
+  if (stage.includes("reading")) return 2;
+  if (stage.includes("checking") || stage.includes("found")) return 1;
+  return 0;
+}
+
+function FoodArt() {
+  return <>
+    <svg className="art-plate" viewBox="0 0 340 340"><circle cx="170" cy="170" r="155" fill="#f9fbff"/><circle cx="170" cy="170" r="118" fill="#dbeafa"/><circle cx="170" cy="170" r="91" fill="#fff"/><path d="M117 183c10-41 50-64 89-45 32 16 42 50 17 73-18 17-40 11-49-4-10-17-1-36 17-40m-60 66c22 9 39 3 50-11m-39-97c6 13 17 18 29 17" fill="none" stroke="#f58237" strokeWidth="12" strokeLinecap="round"/><path d="M136 128l-8-14m27 3-2-17m22 21 7-14m-48 104-13 9m65 10 7 14" stroke="#a9cd37" strokeWidth="9" strokeLinecap="round"/><path d="M251 53l14-24m-1 45 29-4m-47-24-20-17" stroke="#fff" strokeWidth="5" strokeLinecap="round"/></svg>
+    <svg className="art-spark" viewBox="0 0 100 100"><path d="M50 3l9 33 32-15-23 28 29 17-35-3-4 34-12-32-30 16 21-29L7 35l34 8z" fill="#c5e84b"/></svg>
+    <span className="art-caption">GOOD THINGS<br />ON THE MENU</span>
+  </>;
 }
 
 function TagPicker({ label, hint, values, options, placeholder, maxValues, maxEntryLength, onChange }: { label: string; hint: string; values: string[]; options: string[]; placeholder: string; maxValues: number; maxEntryLength: number; onChange: (values: string[]) => void }) {
