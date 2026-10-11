@@ -66,10 +66,11 @@ The frontend uses `POST /api/v1/restaurants/search/stream` for server-sent progr
   "location": "Kyoto",
   "search_radius_meters": 3000,
   "meal": "dinner",
-  "dietary_requirements": ["vegetarian"],
+  "dietary_requirements": ["vegetarian", "no onion or garlic"],
   "avoided_ingredients": [],
   "allergies": [],
-  "preferred_cuisine": null,
+  "preferred_cuisines": ["Maharashtrian", "Assamese"],
+  "party_size": 4,
   "max_budget_per_person": null,
   "currency": null,
   "target_language": "English",
@@ -78,7 +79,7 @@ The frontend uses `POST /api/v1/restaurants/search/stream` for server-sent progr
 }
 ```
 
-All constraints except the result limit are optional. When Gemini is unavailable, common meal, diet, location, radius, and budget expressions are parsed conservatively. A location is required unless browser coordinates are supplied. Geolocation uses explicit browser permission and a 5 km Places bias by default. Text-only radius values are hints and cannot enforce exact distance. Response criteria include validated filters; provider warnings and unknown fields explain missing or unverified information.
+All constraints except the result limit are optional. Meal values include breakfast, brunch, lunch, supper, and dinner. Cuisine, diet, allergy, avoided ingredient, and preference lists accept arbitrary user-entered wording; values are trimmed and duplicate entries are removed without replacing the user's capitalization. When Gemini is unavailable, common meal, diet, location, radius, and budget expressions are parsed conservatively. A location is required unless browser coordinates are supplied. Geolocation uses explicit browser permission and a 5 km Places bias by default. Text-only radius values are hints and cannot enforce exact distance. Meal availability, cuisine identity, party-size suitability, and atmosphere/accessibility needs are reported as unverified because current providers do not offer enough evidence to confirm them.
 
 ### Status meanings
 

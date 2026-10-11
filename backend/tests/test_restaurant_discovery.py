@@ -96,6 +96,85 @@ def test_request_has_no_location_diet_or_currency_defaults_and_parses_obvious_te
         RestaurantSearchRequest(max_results=21)
 
 
+def test_custom_multi_filters_keep_original_values_and_support_new_meals() -> None:
+    request = RestaurantSearchRequest(
+        location="New and unlisted city",
+        meal="brunch",
+        dietary_requirements=["No onion or garlic", "VEGAN", "vegan"],
+        preferred_cuisines=["Maharashtrian", "Assamese", "maharashtrian"],
+        allergies=["Tree nuts", "tree NUTS"],
+        avoided_ingredients=["cilantro"],
+        other_preferences=["near a metro station"],
+        currency="inr",
+        party_size=5,
+    )
+    assert request.meal == "brunch"
+    assert request.location == "New and unlisted city"
+    assert request.dietary_requirements == ["No onion or garlic", "VEGAN"]
+    assert request.preferred_cuisines == ["Maharashtrian", "Assamese"]
+    assert request.allergies == ["Tree nuts"]
+    assert request.avoided_ingredients == ["cilantro"]
+    assert request.other_preferences == ["near a metro station"]
+    assert request.currency == "INR"
+    assert request.party_size == 5
+
+
+@pytest.mark.anyio
+async def test_selected_multi_filters_reach_provider_query_and_report_unverified_constraints() -> (
+    None
+):
+    search = StaticSearchProvider()
+    places = StaticPlacesProvider(
+        [
+            PlaceRecord(
+                place_id="places-custom",
+                name="Local Table",
+                address="New and unlisted city",
+                website_url=None,
+                maps_url=None,
+                business_status="OPERATIONAL",
+            )
+        ]
+    )
+    service = RestaurantDiscoveryService(search, SourceVerifier(safety_check=allow_url), places)
+    request = RestaurantSearchRequest(
+        query="A thoughtful meal",
+        location="New and unlisted city",
+        meal="brunch",
+        preferred_cuisines=["Maharashtrian", "Assamese"],
+        dietary_requirements=["No onion or garlic", "Vegan"],
+        max_budget_per_person=450,
+        currency="INR",
+        allergies=["Tree nuts"],
+        avoided_ingredients=["cilantro"],
+        target_language="Marathi",
+        party_size=5,
+        other_preferences=["near a metro station"],
+    )
+
+    response = await service.discover(request)
+
+    assert all(
+        term in places.query
+        for term in (
+            "New and unlisted city",
+            "brunch",
+            "Maharashtrian",
+            "Assamese",
+            "No onion or garlic",
+            "Vegan",
+            "INR",
+            "Tree nuts",
+            "cilantro",
+            "5 people",
+            "near a metro station",
+        )
+    )
+    assert response.criteria.preferred_cuisines == ["Maharashtrian", "Assamese"]
+    assert any("not verified by current sources" in warning for warning in response.warnings)
+    assert response.restaurants[0].match_status == "uncertain"
+
+
 @pytest.mark.anyio
 async def test_google_places_provider_parses_live_provider_contract_deterministically() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:

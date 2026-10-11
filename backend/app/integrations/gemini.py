@@ -17,7 +17,7 @@ CONSTRAINTS_SCHEMA: dict[str, object] = {
     "properties": {
         "location": {"type": "string"},
         "search_radius_meters": {"type": "integer"},
-        "meal": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
+        "meal": {"type": "string", "enum": ["breakfast", "brunch", "lunch", "supper", "dinner"]},
         "preferred_cuisine": {"type": "string"},
         "dietary_requirements": {"type": "array", "items": {"type": "string"}},
         "avoided_ingredients": {"type": "array", "items": {"type": "string"}},
@@ -26,6 +26,7 @@ CONSTRAINTS_SCHEMA: dict[str, object] = {
         "currency": {"type": "string"},
         "target_language": {"type": "string"},
         "other_preferences": {"type": "array", "items": {"type": "string"}},
+        "party_size": {"type": "integer"},
     },
 }
 MENU_SCHEMA: dict[str, object] = {
@@ -73,7 +74,7 @@ class ParsedConstraints(BaseModel):
 
     location: str | None = None
     search_radius_meters: int | None = Field(default=None, ge=100, le=50_000)
-    meal: Literal["breakfast", "lunch", "dinner"] | None = None
+    meal: Literal["breakfast", "brunch", "lunch", "supper", "dinner"] | None = None
     preferred_cuisine: str | None = None
     dietary_requirements: list[str] = Field(default_factory=list, max_length=8)
     avoided_ingredients: list[str] = Field(default_factory=list, max_length=30)
@@ -82,6 +83,7 @@ class ParsedConstraints(BaseModel):
     currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
     target_language: str | None = None
     other_preferences: list[str] = Field(default_factory=list, max_length=12)
+    party_size: int | None = Field(default=None, ge=1, le=50)
 
 
 class MenuEvidence(BaseModel):
@@ -140,7 +142,8 @@ class GeminiResearchProvider:
             "Do not infer a location from 'near me', dietary facts, currency, or preferences. "
             "Return JSON fields location, search_radius_meters, meal, preferred_cuisine, "
             "dietary_requirements, avoided_ingredients, allergies, max_budget_per_person, "
-            "currency, target_language, other_preferences. Use null or [] when unstated. "
+            "currency, target_language, party_size, other_preferences. "
+            "Use null or [] when unstated. "
             "Request: " + json.dumps(request.query, ensure_ascii=False)
         )
         try:
@@ -162,10 +165,16 @@ class GeminiResearchProvider:
                 updates["search_radius_meters"] = parsed.search_radius_meters
         if request.meal is None and parsed.meal and re.search(rf"\b{parsed.meal}\b", query):
             updates["meal"] = parsed.meal
-        if request.preferred_cuisine is None and _appears_in_query(parsed.preferred_cuisine, query):
+        if (
+            request.preferred_cuisine is None
+            and not request.preferred_cuisines
+            and _appears_in_query(parsed.preferred_cuisine, query)
+        ):
             updates["preferred_cuisine"] = parsed.preferred_cuisine
         for field in ("dietary_requirements", "avoided_ingredients", "allergies"):
             present = getattr(request, field)
+            if present:
+                continue
             grounded = [
                 value for value in getattr(parsed, field) if _appears_in_query(value, query)
             ]
@@ -182,6 +191,9 @@ class GeminiResearchProvider:
                 updates["currency"] = "INR"
         if request.target_language is None and _appears_in_query(parsed.target_language, query):
             updates["target_language"] = parsed.target_language
+        if request.party_size is None and parsed.party_size is not None:
+            if re.search(rf"\b{parsed.party_size}\s+(?:people|persons|guests|diners)\b", query):
+                updates["party_size"] = parsed.party_size
         if parsed.other_preferences:
             updates["other_preferences"] = list(
                 dict.fromkeys(

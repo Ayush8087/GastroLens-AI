@@ -69,6 +69,24 @@ class RestaurantDiscoveryService:
                 ],
             )
         query = _search_query(request, location)
+        cuisine_preferences = request.preferred_cuisines or (
+            [request.preferred_cuisine] if request.preferred_cuisine else []
+        )
+        if request.meal or cuisine_preferences or request.party_size or request.other_preferences:
+            unsupported = []
+            if request.meal:
+                unsupported.append("meal availability")
+            if cuisine_preferences:
+                unsupported.append("cuisine identity")
+            if request.party_size:
+                unsupported.append("party-size suitability")
+            if request.other_preferences:
+                unsupported.append("atmosphere and accessibility preferences")
+            warnings.append(
+                "These are sent as discovery hints but are not verified by current sources: "
+                + ", ".join(unsupported)
+                + "."
+            )
         if request.search_radius_meters and request.latitude is None:
             warnings.append(
                 "A radius without coordinates is used as a text search hint and cannot "
@@ -440,6 +458,7 @@ def _search_query(request: RestaurantSearchRequest, location: str) -> str:
         details = [f"restaurants {request.query}"]
         if request.meal:
             details.append(request.meal)
+        details.extend(request.preferred_cuisines)
         if request.preferred_cuisine:
             details.append(request.preferred_cuisine)
         if request.search_radius_meters:
@@ -452,6 +471,8 @@ def _search_query(request: RestaurantSearchRequest, location: str) -> str:
             details.append(
                 f"under {request.max_budget_per_person:g} {request.currency or ''}".strip()
             )
+        if request.party_size:
+            details.append(f"for {request.party_size} people")
         if request.latitude is None:
             details.append(f"in {location}")
         return " ".join(dict.fromkeys(details))
@@ -462,6 +483,7 @@ def _search_query(request: RestaurantSearchRequest, location: str) -> str:
         details.append("near current location")
     if request.meal:
         details.append(request.meal)
+    details.extend(request.preferred_cuisines)
     if request.preferred_cuisine:
         details.append(request.preferred_cuisine)
     if request.search_radius_meters:
@@ -471,5 +493,7 @@ def _search_query(request: RestaurantSearchRequest, location: str) -> str:
     details.extend(request.allergies)
     if request.max_budget_per_person is not None:
         details.append(f"under {request.max_budget_per_person:g} {request.currency or ''}".strip())
+    if request.party_size:
+        details.append(f"for {request.party_size} people")
     details.extend(request.other_preferences)
     return " ".join(details)

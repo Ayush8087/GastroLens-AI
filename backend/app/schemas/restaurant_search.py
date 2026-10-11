@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-Meal = Literal["breakfast", "lunch", "dinner"]
+Meal = Literal["breakfast", "brunch", "lunch", "supper", "dinner"]
 VerificationStatus = Literal["discovered", "partially_verified", "verified"]
 
 
@@ -23,11 +23,13 @@ class RestaurantSearchRequest(BaseModel):
     target_language: str | None = Field(default=None, min_length=2, max_length=40)
     other_preferences: list[str] = Field(default_factory=list, max_length=12)
     preferred_cuisine: str | None = Field(default=None, min_length=1, max_length=80)
+    preferred_cuisines: list[str] = Field(default_factory=list, max_length=8)
+    party_size: int | None = Field(default=None, ge=1, le=50)
     max_budget_per_person: float | None = Field(default=None, gt=0, le=100_000)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     max_results: int = Field(default=10, ge=1, le=20)
 
-    @field_validator("query", "location", "preferred_cuisine")
+    @field_validator("query", "location", "preferred_cuisine", "target_language")
     @classmethod
     def blank_to_none(cls, value: str | None) -> str | None:
         return value or None
@@ -35,17 +37,25 @@ class RestaurantSearchRequest(BaseModel):
     @field_validator("dietary_requirements")
     @classmethod
     def normalize_dietary_requirements(cls, values: list[str]) -> list[str]:
-        cleaned = list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+        cleaned = _unique_terms(values)
         if any(len(value) > 50 for value in cleaned):
             raise ValueError("dietary requirements must be at most 50 characters")
         return cleaned
 
-    @field_validator("avoided_ingredients", "allergies")
+    @field_validator("avoided_ingredients", "allergies", "other_preferences")
     @classmethod
     def normalize_terms(cls, values: list[str]) -> list[str]:
-        cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+        cleaned = _unique_terms(values)
         if any(len(value) > 70 for value in cleaned):
             raise ValueError("each ingredient or allergy term must be at most 70 characters")
+        return cleaned
+
+    @field_validator("preferred_cuisines")
+    @classmethod
+    def normalize_cuisines(cls, values: list[str]) -> list[str]:
+        cleaned = _unique_terms(values)
+        if any(len(value) > 80 for value in cleaned):
+            raise ValueError("each cuisine must be at most 80 characters")
         return cleaned
 
     @field_validator("currency")
@@ -66,7 +76,7 @@ class RestaurantSearchRequest(BaseModel):
             return self
         folded = self.query.casefold()
         if self.meal is None:
-            for meal in ("breakfast", "lunch", "dinner"):
+            for meal in ("breakfast", "brunch", "lunch", "supper", "dinner"):
                 if re.search(rf"\b{meal}\b", folded):
                     self.meal = meal  # type: ignore[assignment]
                     break
@@ -90,7 +100,7 @@ class RestaurantSearchRequest(BaseModel):
                 "here",
             }:
                 self.location = match.group(1).strip()[:160]
-        if self.preferred_cuisine is None:
+        if self.preferred_cuisine is None and not self.preferred_cuisines:
             cuisine = re.search(r"\b([\w-]{2,40})\s+cuisine\b", self.query, re.IGNORECASE)
             if cuisine:
                 self.preferred_cuisine = cuisine.group(1)
@@ -138,6 +148,16 @@ class RestaurantSearchRequest(BaseModel):
             if avoided:
                 self.avoided_ingredients = [avoided.group(1).strip()]
         return self
+
+
+def _unique_terms(values: list[str]) -> list[str]:
+    """Trim whitespace, preserve wording, and remove case-insensitive duplicates."""
+    unique: dict[str, str] = {}
+    for raw in values:
+        value = raw.strip()
+        if value:
+            unique.setdefault(value.casefold(), value)
+    return list(unique.values())
 
 
 class SearchResult(BaseModel):

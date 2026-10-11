@@ -371,10 +371,10 @@ def _dietary_status(line: str, request: RestaurantSearchRequest) -> tuple[str, l
         for requirement in request.dietary_requirements
         if (
             re.search(
-                rf"\b(?:not|non[-\s])\s+(?:certified\s+|suitable\s+for\s+)?{re.escape(requirement)}\b",
+                rf"\b(?:not|non[-\s])\s+(?:certified\s+|suitable\s+for\s+)?{re.escape(requirement.casefold())}\b",
                 folded,
             )
-            or re.search(rf"\b{re.escape(requirement)}[- ]free\b", folded)
+            or re.search(rf"\b{re.escape(requirement.casefold())}[- ]free\b", folded)
         )
     ]
     if negated:
@@ -386,7 +386,7 @@ def _dietary_status(line: str, request: RestaurantSearchRequest) -> tuple[str, l
     explicit = [
         requirement
         for requirement in request.dietary_requirements
-        if re.search(rf"\b{re.escape(requirement)}\b", folded)
+        if re.search(rf"\b{re.escape(requirement.casefold())}\b", folded)
     ]
     if len(explicit) == len(request.dietary_requirements):
         uncertified = [
@@ -458,15 +458,22 @@ def _score_candidate(
                 reasons.append(
                     "Printed price currency is missing or differs from the requested currency."
                 )
-    if request.meal or request.preferred_cuisine:
+    cuisine_preferences = request.preferred_cuisines or (
+        [request.preferred_cuisine] if request.preferred_cuisine else []
+    )
+    if request.meal or cuisine_preferences:
         reasons.append("Meal timing or cuisine has not been independently verified.")
+    if request.party_size:
+        reasons.append("Party size suitability has not been independently verified.")
     if request.other_preferences:
         reasons.append("Other preferences have not been independently verified.")
     confirmed = any(
         item.dietary_status == "confirmed" and item.evidence_type == "printed_text"
         for item in eligible
     )
-    other_constraints_verified = not request.meal and not request.preferred_cuisine
+    other_constraints_verified = (
+        not request.meal and not cuisine_preferences and not request.party_size
+    )
     if (
         confirmed
         and budget_known
@@ -499,7 +506,8 @@ def _score_candidate(
         or request.avoided_ingredients
         or (request.max_budget_per_person is not None and request.currency is None)
         or request.meal is not None
-        or request.preferred_cuisine is not None
+        or bool(cuisine_preferences)
+        or request.party_size is not None
         or bool(request.other_preferences)
     ):
         return (

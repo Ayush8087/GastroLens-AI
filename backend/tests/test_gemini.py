@@ -52,6 +52,43 @@ async def test_gemini_interpretation_only_applies_values_grounded_in_user_text()
 
 
 @pytest.mark.anyio
+async def test_explicit_filter_values_take_precedence_over_conflicting_parsed_values() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return _gemini_response(
+            {
+                "location": "Kyoto",
+                "meal": "dinner",
+                "preferred_cuisine": "Italian",
+                "dietary_requirements": ["vegetarian"],
+                "avoided_ingredients": [],
+                "allergies": [],
+                "max_budget_per_person": None,
+                "currency": None,
+                "target_language": None,
+                "other_preferences": [],
+                "party_size": None,
+            }
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await GeminiResearchProvider(
+            SecretStr("test-key"), client=client
+        ).interpret_request(
+            RestaurantSearchRequest(
+                query="Find vegetarian dinner in Kyoto",
+                dietary_requirements=["Vegan"],
+                preferred_cuisines=["Assamese"],
+                meal="brunch",
+            )
+        )
+
+    assert result.meal == "brunch"
+    assert result.dietary_requirements == ["Vegan"]
+    assert result.preferred_cuisine is None
+    assert result.preferred_cuisines == ["Assamese"]
+
+
+@pytest.mark.anyio
 async def test_menu_extraction_accepts_only_exact_source_quotes_and_translation_is_separate() -> (
     None
 ):
