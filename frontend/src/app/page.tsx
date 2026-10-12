@@ -11,18 +11,22 @@ type Restaurant = {
   menu_url: string | null;
   maps_url: string | null;
   business_status: string | null;
+  rating?: number | null;
+  review_count?: number | null;
+  place_type?: string | null;
+  google_price_level?: string | null;
   location_match: "confirmed" | "unconfirmed";
   verification_status: "discovered" | "partially_verified" | "verified";
   match_status: "exact_match" | "partial_match" | "uncertain" | "excluded";
   score: number;
   match_reasons: string[];
   source_evidence: { url: string; title: string | null; snippet: string | null; accessible: boolean | null; retrieved_at: string }[];
-  menu_items: { name: string; original_text: string; translated_text: string | null; description: string | null; translated_description: string | null; section: string | null; price: number | null; currency: string | null; source_url: string; evidence: string; evidence_type: "printed_text" | "ocr_transcription"; retrieved_at: string; dietary_status: "confirmed" | "contradicted" | "unknown"; allergen_status: "conflict" | "unknown"; warnings: string[] }[];
+  menu_items: { name: string; original_text: string; translated_text: string | null; description: string | null; translated_description: string | null; section: string | null; price: number | null; currency: string | null; source_url: string; evidence: string; evidence_type: "printed_text" | "ocr_transcription"; retrieved_at: string; dietary_status: "confirmed" | "contradicted" | "unknown"; allergen_status: "conflict" | "unknown"; match_status?: "match" | "partial" | "needs_checking" | "excluded"; match_reasons?: string[]; warnings: string[] }[];
   unknown_fields: string[];
 };
 
 type SearchResponse = {
-  criteria?: { allergies?: string[]; dietary_requirements?: string[]; preferred_cuisines?: string[]; party_size?: number | null };
+  criteria?: { allergies?: string[]; dietary_requirements?: string[]; preferred_cuisines?: string[]; preferred_cuisine?: string | null; party_size?: number | null; meal?: string | null; max_budget_per_person?: number | null; currency?: string | null };
   restaurants: Restaurant[];
   warnings: string[];
   provider_coverage: string;
@@ -286,14 +290,22 @@ export default function Home() {
         </form>
       </section>
 
-      {loading && <><section className="status-panel" role="status" aria-live="polite"><div className="research-orbit" aria-hidden="true"><span /><i /><b /></div><div className="research-progress"><div className="research-title"><div><strong>We’re on the case</strong><p>{progress || "Preparing your restaurant research"}</p></div><span className="live-tag"><i /> LIVE RESEARCH</span></div><div className="research-steps">{["Find places", "Check sources", "Read menus", "Match dishes"].map((step, index) => <span key={step} className={index <= researchStep(progress) ? "research-step is-active" : "research-step"}><i>{index < researchStep(progress) ? "✓" : `0${index + 1}`}</i>{step}</span>)}</div></div><button type="button" className="inline-action cancel-action" onClick={cancelSearch}>Cancel search</button></section><div className="skeleton-list" aria-hidden="true"><div className="skeleton-card"><i /><span /><span /><b /></div><div className="skeleton-card"><i /><span /><span /><b /></div></div></>}
+      {loading && <><section className="status-panel" role="status" aria-live="polite"><div className="research-orbit" aria-hidden="true"><span /><i /><b /></div><div className="research-progress"><div className="research-title"><div><strong>We’re on the case</strong><p>{progress || "Preparing your restaurant research"}</p></div><span className="live-tag"><i /> LIVE RESEARCH</span></div><div className="research-steps">{["Find places", "Check sources", "Read menus", "Match dishes", "Rank results"].map((step, index) => <span key={step} className={index <= researchStep(progress) ? "research-step is-active" : "research-step"}><i>{index < researchStep(progress) ? "✓" : `0${index + 1}`}</i>{step}</span>)}</div></div><button type="button" className="inline-action cancel-action" onClick={cancelSearch}>Cancel search</button></section><div className="skeleton-list" aria-hidden="true"><div className="skeleton-card"><i /><span /><span /><b /></div><div className="skeleton-card"><i /><span /><span /><b /></div></div></>}
       {error && <section className="notice error-notice" role="alert"><span>!</span><div><strong>We couldn’t complete that search.</strong><p>{error}</p><button className="inline-action" onClick={(event) => { event.preventDefault(); document.querySelector<HTMLFormElement>("form")?.requestSubmit(); }}>Try again ↗</button></div></section>}
 
       {result && <section className="results" aria-live="polite" id="results">
-        <div className="results-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> YOUR RESEARCH</div><h2>{result.restaurants.length ? `${result.restaurants.length} places to explore` : "No places found yet"}</h2></div><div className="results-actions"><span className="results-count">{result.restaurants.length} {result.restaurants.length === 1 ? "result" : "results"}</span><button type="button" className="edit-search" onClick={editSearch}>Edit search ↗</button></div></div>
+        <div className="results-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> YOUR RESEARCH</div><h2>{result.restaurants.length ? "Restaurants researched" : "No places found yet"}</h2><p className="result-summary">{result.restaurants.length} places checked · {result.restaurants.filter((place) => place.menu_items.length > 0).length} with readable menu evidence · {result.restaurants.reduce((total, place) => total + place.menu_items.length, 0)} dishes extracted</p></div><div className="results-actions"><span className="results-count">{result.restaurants.length} {result.restaurants.length === 1 ? "result" : "results"}</span><button type="button" className="edit-search" onClick={editSearch}>Edit search ↗</button></div></div>
         {result.warnings.map((warning) => <div className="notice warning-notice" key={warning}><span>i</span><p>{warning}</p></div>)}
         {!result.restaurants.length && <div className="empty-state"><span>⌕</span><strong>No places to show for this search.</strong><p>Try a broader location or adjust your filters. If a provider is not configured, its warning appears above.</p></div>}
-        <div className="result-list">{result.restaurants.map((restaurant, index) => <RestaurantCard key={restaurant.place_id || restaurant.restaurant_name || index} restaurant={restaurant} index={index + 1} allergies={result.criteria?.allergies || []} />)}</div>
+        {result.restaurants.length > 0 && <p className="ranking-note">Ranked from verified menu evidence and your constraints. Ratings and review counts are shown only when supplied by the places provider.</p>}
+        {result.criteria?.max_budget_per_person != null && <p className="budget-note">Budget is checked per dish using a printed price in the requested currency. It does not confirm the cost of a full meal; unpriced, OCR-read, or differently denominated dishes need checking.</p>}
+        {(["exact_match", "partial_match", "uncertain", "excluded"] as const).map((status) => {
+          const places = result.restaurants.filter((restaurant) => restaurant.match_status === status);
+          if (!places.length) return null;
+          const title = status === "exact_match" ? "Best matches" : status === "partial_match" ? "Could work" : status === "uncertain" ? "Needs checking" : "Excluded by your requirements";
+          const description = status === "exact_match" ? "Menu evidence supports all checked requirements." : status === "partial_match" ? "Some requirements match; review the notes for gaps." : status === "uncertain" ? "Sources are incomplete, so suitability could not be confirmed." : "These listings conflict with a hard requirement.";
+          return <section className={`result-group result-group-${status}`} key={status}><div className="result-group-heading"><h3>{title} <span>{places.length}</span></h3><p>{description}</p></div><div className="result-list">{places.map((restaurant, index) => <RestaurantCard key={restaurant.place_id || restaurant.restaurant_name || index} restaurant={restaurant} index={result.restaurants.indexOf(restaurant) + 1} allergies={result.criteria?.allergies || []} />)}</div></section>;
+        })}
         {result.provider_coverage && <p className="coverage-note">{result.provider_coverage}</p>}
       </section>}
 
@@ -305,9 +317,11 @@ export default function Home() {
 
 function researchStep(progress: string) {
   const stage = progress.toLocaleLowerCase();
-  if (stage.includes("matching") || stage.includes("ranking")) return 3;
+  if (stage.includes("preparing evidence-backed") || stage.includes("ranking")) return 4;
+  if (stage.includes("matching") || stage.includes("comparing")) return 3;
   if (stage.includes("reading")) return 2;
-  if (stage.includes("checking") || stage.includes("found")) return 1;
+  if (stage.includes("checking") || stage.includes("shortlist")) return 1;
+  if (stage.includes("found") || stage.includes("search")) return 0;
   return 0;
 }
 
@@ -368,13 +382,55 @@ function TagPicker({ label, hint, values, options, placeholder, maxValues, maxEn
 function RestaurantCard({ restaurant, index, allergies }: { restaurant: Restaurant; index: number; allergies: string[] }) {
   const name = restaurant.restaurant_name || "Restaurant name unavailable";
   const status = restaurant.match_status === "exact_match" ? "Exact match" : restaurant.match_status === "partial_match" ? "Partial match" : restaurant.match_status === "excluded" ? "Excluded" : "Uncertain";
+  const candidateDishes = [...restaurant.menu_items].sort((a, b) => {
+    const priority = { match: 0, partial: 1, needs_checking: 2, excluded: 3 };
+    return (priority[a.match_status || "needs_checking"] - priority[b.match_status || "needs_checking"]);
+  });
+  const visibleDishes = candidateDishes.slice(0, 6);
+  const remainingDishes = candidateDishes.slice(6);
+  const dishCounts = {
+    match: candidateDishes.filter((dish) => dish.match_status === "match").length,
+    partial: candidateDishes.filter((dish) => dish.match_status === "partial").length,
+    needs_checking: candidateDishes.filter((dish) => dish.match_status === "needs_checking" || !dish.match_status).length,
+    excluded: candidateDishes.filter((dish) => dish.match_status === "excluded").length,
+  };
+  const priceLevels: Record<string, string> = {
+    PRICE_LEVEL_FREE: "Free",
+    PRICE_LEVEL_INEXPENSIVE: "Inexpensive (1 of 4)",
+    PRICE_LEVEL_MODERATE: "Moderate (2 of 4)",
+    PRICE_LEVEL_EXPENSIVE: "Expensive (3 of 4)",
+    PRICE_LEVEL_VERY_EXPENSIVE: "Very expensive (4 of 4)",
+  };
+  const priceLevel = restaurant.google_price_level ? priceLevels[restaurant.google_price_level] || null : null;
+  const renderDish = (dish: Restaurant["menu_items"][number]) => {
+    const dishStatus = dish.match_status || (dish.dietary_status === "confirmed" ? "match" : dish.dietary_status === "contradicted" ? "excluded" : "needs_checking");
+    const statusLabel = dishStatus === "match" ? "✓ Matches" : dishStatus === "partial" ? "◒ Partial match" : dishStatus === "excluded" ? "× Does not fit" : "? Needs checking";
+    return <div className={`dish dish-${dishStatus}`} key={`${dish.source_url}-${dish.original_text}`}>
+      <div className="dish-main">
+        {dish.section && <small className="dish-section">{dish.section}</small>}
+        <div className="dish-title"><strong>{dish.translated_text || dish.name}</strong><span className={`dietary-pill dietary-${dishStatus}`}>{statusLabel}</span></div>
+        <small className="dish-diet-status">Dietary status {dish.dietary_status}</small>
+        {dish.translated_text && <small>Original: {dish.name} · translation is AI generated</small>}
+        {dish.translated_description && <p>{dish.translated_description}</p>}
+        {dish.description && <p>{dish.description}</p>}
+        <p className="evidence-quote">“{dish.evidence}”</p>
+        {(dish.match_reasons || []).map((reason) => <small className="dish-match-reason" key={reason}>{reason}</small>)}
+        {allergies.length > 0 && <p className="dish-warning">{dish.allergen_status === "conflict" ? "Requested allergen appears in source text." : "Allergen absence is unconfirmed. Ask the restaurant before ordering."}</p>}
+        {dish.evidence_type === "ocr_transcription" && <small>OCR transcription · price needs manual checking</small>}
+        <SafeLink href={dish.source_url}>Menu source ↗</SafeLink>
+      </div>
+      <div className="dish-price">{dish.price == null ? "No price listed" : `${dish.currency ? `${dish.currency} ` : ""}${dish.price.toFixed(2)}${dish.currency ? "" : " · currency unclear"}`}</div>
+    </div>;
+  };
   return <article className="restaurant-card">
     <div className="card-index">{String(index).padStart(2, "0")}</div>
     <div className="card-main">
       <div className="card-topline"><span className="match-pill"><span />{status}</span><span className="verify-label">{restaurant.verification_status.replaceAll("_", " ")}</span></div>
       <h3>{name}</h3>
+      <div className="place-facts">{restaurant.rating != null && <span className="place-rating"><b>★</b> Rated {restaurant.rating.toFixed(1)}{restaurant.review_count != null ? ` (${restaurant.review_count.toLocaleString()} Google reviews)` : " by Google"}</span>}{priceLevel && <span>Google price level: {priceLevel}</span>}{restaurant.place_type && <span>{restaurant.place_type}</span>}{restaurant.maps_url && <SafeLink href={restaurant.maps_url}>Google Maps ↗</SafeLink>}</div>
       <p className="restaurant-address">{restaurant.city_or_address || "Address not provided by listing provider"}{restaurant.distance_meters != null ? ` · ${(restaurant.distance_meters / 1000).toFixed(1)} km away` : ""}{restaurant.business_status ? ` · ${restaurant.business_status.toLowerCase().replaceAll("_", " ")}` : ""}{restaurant.location_match === "unconfirmed" ? " · location match unconfirmed" : ""}</p>
-      {restaurant.menu_items.length > 0 ? <div className="dishes"><h4>MENU FINDINGS</h4>{restaurant.menu_items.map((dish) => <div className="dish" key={`${dish.source_url}-${dish.original_text}`}><div><div className="dish-title"><strong>{dish.translated_text || dish.name}</strong><span className={`dietary-pill dietary-${dish.dietary_status}`}>{dish.dietary_status === "confirmed" ? "Diet label confirmed" : dish.dietary_status === "contradicted" ? "Conflicts with request" : "Dietary status unknown"}</span></div>{dish.translated_text && <small>AI translation · original name: {dish.name}</small>}{dish.section && <small>Menu section: {dish.section}</small>}{dish.translated_description && <p>Translated description: {dish.translated_description}</p>}{dish.description && <p>Original description: {dish.description}</p>}{allergies.length ? <p className="dish-warning">{dish.allergen_status === "conflict" ? "Requested allergen appears in source text." : "Allergen safety is unconfirmed. Contact the restaurant before ordering."}</p> : null}<p className="evidence-quote">“{dish.evidence}”</p>{dish.evidence_type === "ocr_transcription" && <small>OCR transcription · unverified against searchable source text</small>}<SafeLink href={dish.source_url}>Dish source ↗</SafeLink>{dish.warnings.map((warning) => <p className="dish-warning" key={warning}>{warning}</p>)}<small>Source retrieved {new Date(dish.retrieved_at).toISOString().replace("T", " ").slice(0, 16)} UTC</small></div><span>{dish.price == null ? "Price not found" : `${dish.evidence_type === "ocr_transcription" ? "OCR · " : ""}${dish.currency ? `${dish.currency} ${dish.price.toFixed(2)}` : `${dish.price.toFixed(2)} · currency unclear`}${dish.evidence_type === "ocr_transcription" ? " · unverified" : ""}`}</span></div>)}</div> : <div className="uncertainty"><span>?</span><p>Menu and dietary suitability have not been verified. No dish or price is inferred from the listing.</p></div>}
+      <section className="why-match"><h4>WHY IT MATCHES</h4><ul>{restaurant.match_reasons.map((reason) => <li key={reason}><span aria-hidden="true">✦</span>{reason}</li>)}</ul>{restaurant.rating == null && <p className="review-gap">Google rating and review count were not returned for this listing.</p>}</section>
+      {restaurant.menu_items.length > 0 ? <section className="dishes"><div className="dish-section-heading"><h4>DISHES</h4><span>{dishCounts.match} match · {dishCounts.partial} partial · {dishCounts.needs_checking} need checking · {dishCounts.excluded} excluded</span></div><p className="dish-count-note">Showing {visibleDishes.length} of {restaurant.menu_items.length} extracted menu candidates. Price and suitability are evaluated per dish.</p>{visibleDishes.map(renderDish)}{remainingDishes.length > 0 && <details className="all-dishes"><summary>Show {remainingDishes.length} more menu candidates</summary>{remainingDishes.map(renderDish)}</details>}</section> : <div className="uncertainty"><span>?</span><p>{restaurant.menu_url ? "A menu source was found, but no readable dish and printed price could be verified." : "No readable menu was found. Dietary suitability is unknown; no dish or price is inferred from the listing."}</p>{restaurant.menu_url && <SafeLink href={restaurant.menu_url}>Open menu source ↗</SafeLink>}</div>}
       <div className="card-links">{restaurant.maps_url && <SafeLink href={restaurant.maps_url}>View listing ↗</SafeLink>}{restaurant.official_website_url && <SafeLink href={restaurant.official_website_url}>Website ↗</SafeLink>}{restaurant.menu_url && <SafeLink href={restaurant.menu_url}>Menu source ↗</SafeLink>}</div>
       {restaurant.source_evidence.length > 0 && <details className="sources"><summary>Sources &amp; evidence <span>({restaurant.source_evidence.length})</span></summary><ul>{restaurant.source_evidence.map((source, sourceIndex) => <li key={`${source.url}-${sourceIndex}`}><SafeLink href={source.url}>{source.title || source.url}</SafeLink>{source.snippet && <p>“{source.snippet}”</p>}<small>Retrieved {new Date(source.retrieved_at).toISOString().replace("T", " ").slice(0, 16)} UTC · {source.accessible === false ? "source inaccessible" : source.accessible === true ? "source accessible" : "not checked"}</small></li>)}</ul></details>}
     </div>

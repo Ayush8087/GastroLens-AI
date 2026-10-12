@@ -268,6 +268,10 @@ class RestaurantDiscoveryService:
                         if value is None
                     ],
                     place_id=place.place_id,
+                    rating=place.rating,
+                    review_count=place.user_rating_count,
+                    place_type=place.primary_type_display_name,
+                    google_price_level=place.price_level,
                     maps_url=place.maps_url,
                     business_status=place.business_status,
                     latitude=place.latitude,
@@ -396,6 +400,7 @@ class RestaurantDiscoveryService:
             return verified
 
         checked = await asyncio.gather(*(verify_candidate(candidate) for candidate in candidates))
+        report("Comparing menu evidence against your requirements")
         priority = {"exact_match": 0, "partial_match": 1, "uncertain": 2, "excluded": 3}
         checked.sort(
             key=lambda item: (
@@ -405,6 +410,7 @@ class RestaurantDiscoveryService:
                 item.place_id or "",
             )
         )
+        report("Preparing evidence-backed restaurant results")
         return RestaurantSearchResponse(
             criteria=request,
             restaurants=checked,

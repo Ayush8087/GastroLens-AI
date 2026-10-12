@@ -196,6 +196,8 @@ class MenuItem(BaseModel):
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     dietary_status: Literal["confirmed", "contradicted", "unknown"] = "unknown"
     allergen_status: Literal["conflict", "unknown"] = "unknown"
+    match_status: Literal["match", "partial", "needs_checking", "excluded"] = "needs_checking"
+    match_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -211,6 +213,10 @@ class RestaurantCandidate(BaseModel):
     unknown_fields: list[str] = Field(default_factory=list)
     dietary_suitability: Literal["unconfirmed"] = "unconfirmed"
     place_id: str | None = None
+    rating: float | None = Field(default=None, ge=0, le=5)
+    review_count: int | None = Field(default=None, ge=0)
+    place_type: str | None = None
+    google_price_level: str | None = None
     maps_url: str | None = None
     business_status: str | None = None
     latitude: float | None = None

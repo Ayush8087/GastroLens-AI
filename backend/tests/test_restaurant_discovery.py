@@ -9,6 +9,7 @@ from pydantic import SecretStr, ValidationError
 
 from app.api.routes.restaurants import get_discovery_service
 from app.core.config import Settings, get_settings
+from app.integrations.gemini import MenuEvidence
 from app.integrations.places import GooglePlacesProvider, PlaceRecord, PlacesProviderError
 from app.integrations.tavily_search import SearchProviderError, TavilySearchProvider
 from app.integrations.translation import OpenAITranslationProvider
@@ -21,9 +22,11 @@ from app.schemas.restaurant_search import (
 )
 from app.services.menu_research import (
     MenuResearchService,
+    _evaluate_dish_match,
     _extract_text,
     _parse_menu_lines,
     _score_candidate,
+    _unpriced_evidence_item,
 )
 from app.services.restaurant_discovery import RestaurantDiscoveryService
 from app.services.source_verification import SourceVerifier, normalize_url
@@ -180,6 +183,8 @@ async def test_google_places_provider_parses_live_provider_contract_deterministi
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-Goog-Api-Key"] == "test-key"
         assert "places.formattedAddress" in request.headers["X-Goog-FieldMask"]
+        assert "places.rating" in request.headers["X-Goog-FieldMask"]
+        assert "places.priceLevel" in request.headers["X-Goog-FieldMask"]
         return httpx.Response(
             200,
             json={
@@ -190,6 +195,10 @@ async def test_google_places_provider_parses_live_provider_contract_deterministi
                         "formattedAddress": "Kyoto",
                         "websiteUri": "https://nori.example",
                         "businessStatus": "OPERATIONAL",
+                        "rating": 4.6,
+                        "userRatingCount": 138,
+                        "primaryTypeDisplayName": {"text": "Japanese restaurant"},
+                        "priceLevel": "PRICE_LEVEL_MODERATE",
                     },
                     {
                         "id": "places/1",
@@ -207,6 +216,10 @@ async def test_google_places_provider_parses_live_provider_contract_deterministi
     assert len(places) == 1
     assert places[0].name == "Nori"
     assert places[0].address == "Kyoto"
+    assert places[0].rating == 4.6
+    assert places[0].user_rating_count == 138
+    assert places[0].primary_type_display_name == "Japanese restaurant"
+    assert places[0].price_level == "PRICE_LEVEL_MODERATE"
 
 
 @pytest.mark.anyio
@@ -599,6 +612,103 @@ def test_budget_matching_needs_matching_explicit_currency() -> None:
     yen = _parse_menu_lines("Tofu bowl JPY 1400", "https://restaurant.example/menu", request)
     assert yen[0].currency == "JPY"
     assert _score_candidate(yen, request)[0] == "uncertain"
+
+
+def test_dish_match_never_confirms_unknown_diet_or_uncomparable_budget() -> None:
+    request = RestaurantSearchRequest(
+        location="Kyoto",
+        dietary_requirements=["vegetarian"],
+        max_budget_per_person=20,
+        currency="USD",
+    )
+    unknown = MenuItem(
+        name="Mushroom bowl",
+        original_text="Mushroom bowl $12",
+        price=12,
+        currency=None,
+        source_url="https://restaurant.example/menu",
+        evidence="Mushroom bowl $12",
+        dietary_status="unknown",
+    )
+    status, reasons = _evaluate_dish_match(unknown, request)
+    assert status == "needs_checking"
+    assert any("Dietary suitability is not confirmed" in reason for reason in reasons)
+    assert any("matching currency" in reason for reason in reasons)
+
+    confirmed_over_budget = MenuItem(
+        name="Vegetarian tasting plate",
+        original_text="Vegetarian tasting plate USD 28.00",
+        price=28,
+        currency="USD",
+        source_url="https://restaurant.example/menu",
+        evidence="Vegetarian tasting plate USD 28.00",
+        dietary_status="confirmed",
+    )
+    assert _evaluate_dish_match(confirmed_over_budget, request)[0] == "excluded"
+
+
+def test_google_restaurant_type_can_support_a_cuisine_match_reason() -> None:
+    request = RestaurantSearchRequest(
+        location="Bari",
+        dietary_requirements=["vegetarian"],
+        preferred_cuisines=["Italian", "Greek"],
+    )
+    dish = MenuItem(
+        name="Vegetarian focaccia",
+        original_text="Vegetarian focaccia EUR 8.00",
+        price=8,
+        currency="EUR",
+        source_url="https://restaurant.example/menu",
+        evidence="Vegetarian focaccia EUR 8.00",
+        dietary_status="confirmed",
+    )
+    status, _, reasons = _score_candidate([dish], request, place_type="Italian restaurant")
+    assert status == "exact_match"
+    assert any("matching Italian cuisine" in reason for reason in reasons)
+    assert not any("Cuisine is not confirmed" in reason for reason in reasons)
+
+
+def test_menu_dish_and_price_on_adjacent_lines_keep_both_as_evidence() -> None:
+    request = RestaurantSearchRequest(location="Kyoto")
+    items = _parse_menu_lines(
+        "SMALL PLATES\nMiso aubergine\nJPY 1,400",
+        "https://restaurant.example/menu",
+        request,
+    )
+    assert len(items) == 1
+    assert items[0].name == "Miso aubergine"
+    assert items[0].price == 1400
+    assert items[0].currency == "JPY"
+    assert "Miso aubergine" in items[0].evidence
+    assert "JPY 1,400" in items[0].evidence
+
+
+def test_grounded_unpriced_menu_dish_is_returned_without_inventing_a_price() -> None:
+    item = _unpriced_evidence_item(
+        MenuEvidence(
+            quote="Focaccia rustica with rosemary",
+            name="Focaccia rustica",
+            section="Antipasti",
+        ),
+        "https://casa.example/menu",
+        RestaurantSearchRequest(location="Bari"),
+        exact_text_match=True,
+    )
+    assert item is not None
+    assert item.name == "Focaccia rustica"
+    assert item.price is None
+    assert item.currency is None
+    assert item.section == "Antipasti"
+    assert item.evidence == "Focaccia rustica with rosemary"
+    assert (
+        _unpriced_evidence_item(
+            MenuEvidence(quote="Focaccia rustica with rosemary", name="Hallucinated dish"),
+            "https://casa.example/menu",
+            RestaurantSearchRequest(location="Bari"),
+            exact_text_match=True,
+        )
+        is None
+    )
 
 
 def test_pdf_menu_text_is_extracted_with_printed_evidence() -> None:

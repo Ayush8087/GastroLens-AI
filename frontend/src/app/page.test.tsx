@@ -83,6 +83,10 @@ describe("restaurant search experience", () => {
           menu_url: null,
           maps_url: "https://maps.example/place/1",
           business_status: "OPERATIONAL",
+          rating: 4.6,
+          review_count: 138,
+          place_type: "Japanese restaurant",
+          google_price_level: "PRICE_LEVEL_MODERATE",
           location_match: "confirmed",
           verification_status: "partially_verified",
           match_status: "uncertain",
@@ -100,6 +104,8 @@ describe("restaurant search experience", () => {
             evidence: "Mushroom noodles EUR 14.00",
             retrieved_at: "2026-10-10T12:00:00Z",
             dietary_status: "unknown",
+            match_status: "needs_checking",
+            match_reasons: ["Dietary suitability is not confirmed by this menu evidence."],
             warnings: ["Dietary status is not confirmed."],
           }],
           unknown_fields: ["menu"],
@@ -117,8 +123,15 @@ describe("restaurant search experience", () => {
     fireEvent.click(screen.getByRole("button", { name: /find restaurants/i }));
 
     expect(await screen.findByRole("heading", { name: "Garden Table" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /needs checking/i })).toBeInTheDocument();
     expect(fetchMock.mock.calls[0][0]).toContain("/api/v1/restaurants/search/stream");
+    expect(screen.getByText(/Rated 4\.6 \(138 Google reviews\)/)).toBeInTheDocument();
+    expect(screen.getByText("Japanese restaurant")).toBeInTheDocument();
+    expect(screen.getByText("Google price level: Moderate (2 of 4)")).toBeInTheDocument();
+    expect(screen.getByText("WHY IT MATCHES")).toBeInTheDocument();
     expect(screen.getByText("Dietary status unknown")).toBeInTheDocument();
+    expect(screen.getByText("? Needs checking")).toBeInTheDocument();
+    expect(screen.getByText("Dietary suitability is not confirmed by this menu evidence.")).toBeInTheDocument();
     expect(screen.getByText("EUR 14.00")).toBeInTheDocument();
     expect(screen.getByText(/Mushroom noodles EUR 14.00/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /view listing/i })).toHaveAttribute("href", "https://maps.example/place/1");

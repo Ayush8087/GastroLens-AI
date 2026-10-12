@@ -38,6 +38,7 @@ MENU_SCHEMA: dict[str, object] = {
                 "type": "object",
                 "properties": {
                     "quote": {"type": "string"},
+                    "name": {"type": "string"},
                     "section": {"type": "string"},
                 },
                 "required": ["quote"],
@@ -90,6 +91,7 @@ class MenuEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     quote: str = Field(min_length=3, max_length=500)
+    name: str | None = Field(default=None, min_length=2, max_length=160)
     section: str | None = Field(default=None, max_length=100)
 
 
@@ -219,10 +221,12 @@ class GeminiResearchProvider:
         if not self.configured:
             raise GeminiProviderError("Gemini is not configured (GEMINI_API_KEY is missing).")
         prompt = (
-            "Find menu entries and return only exact source quotes that contain a printed dish "
-            "name and price. Do not infer or normalize prices or currency. Each quote must be "
-            "copied verbatim from the supplied source. Include a section only when its exact "
-            "label appears in the source. If no priced dish is supported, return {items: []}.\n"
+            "Find individual dish entries, whether or not a price is printed. Return the dish name "
+            "copied exactly from the source and an exact source quote containing that name. Never "
+            "invent a dish or price, infer a price from a set menu, or normalize currency. Include "
+            "a section only when its exact label appears in the source. A group menu price is not "
+            "an individual dish price. If no individual dish is supported by an exact quote, "
+            "return {items: []}.\n"
             "Source text:\n" + text[:30_000]
         )
         parts: list[dict[str, object]] = [{"text": prompt}]

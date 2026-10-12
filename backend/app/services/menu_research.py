@@ -7,7 +7,7 @@ import httpx
 import pymupdf
 from bs4 import BeautifulSoup
 
-from app.integrations.gemini import GeminiProviderError, GeminiResearchProvider
+from app.integrations.gemini import GeminiProviderError, GeminiResearchProvider, MenuEvidence
 from app.schemas.restaurant_search import (
     MenuItem,
     RestaurantCandidate,
@@ -20,8 +20,12 @@ MAX_MENU_BYTES = 2_000_000
 MAX_PDF_PAGES = 50
 PRICE_PATTERN = re.compile(
     r"(?P<name>.+?)\s+(?:(?P<prefix_code>[A-Z]{3})\s+)?"
-    r"(?P<symbol>€|£|\$)?\s*(?P<amount>\d{1,5}(?:[.,]\d{1,2})?)\s*"
+    r"(?P<symbol>€|£|\$)?\s*(?P<amount>\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{1,5}(?:[.,]\d{1,2})?)\s*"
     r"(?P<code>[A-Z]{3})?\s*$",
+)
+STANDALONE_PRICE_PATTERN = re.compile(
+    r"(?:(?P<prefix_code>[A-Z]{3})\s+)?(?P<symbol>€|£|\$)?\s*"
+    r"(?P<amount>\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{1,5}(?:[.,]\d{1,2})?)\s*(?P<code>[A-Z]{3})?"
 )
 
 
@@ -126,9 +130,16 @@ class MenuResearchService:
                     ) or evidence.quote in seen_evidence:
                         continue
                     parsed_items = _parse_menu_lines(evidence.quote, final_url, request)
-                    if not parsed_items:
+                    if parsed_items:
+                        item = parsed_items[0]
+                    elif evidence.name and evidence.name.casefold() in evidence.quote.casefold():
+                        item = _unpriced_evidence_item(
+                            evidence, final_url, request, exact_text_match=exact_text_match
+                        )
+                        if item is None:
+                            continue
+                    else:
                         continue
-                    item = parsed_items[0]
                     if not menu_is_official and item.dietary_status == "confirmed":
                         item.dietary_status = "unknown"
                         item.warnings.append(
@@ -165,8 +176,10 @@ class MenuResearchService:
                     candidate.menu_items, request.target_language
                 )
             )
+        for item in candidate.menu_items:
+            item.match_status, item.match_reasons = _evaluate_dish_match(item, request)
         candidate.match_status, candidate.score, candidate.match_reasons = _score_candidate(
-            candidate.menu_items, request
+            candidate.menu_items, request, place_type=candidate.place_type
         )
         if translation_unavailable:
             candidate.match_reasons.append(
@@ -302,15 +315,45 @@ def _parse_menu_lines(
     items: list[MenuItem] = []
     seen: set[str] = set()
     section: str | None = None
-    for raw_line in text.splitlines():
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
         line = " ".join(raw_line.split()).strip(" •·-–—")
+        index += 1
         if not line or len(line) > 240:
             continue
         found = PRICE_PATTERN.fullmatch(line)
+        evidence = line
         if not found:
             if len(line) < 45 and line.isupper() and not re.search(r"\d", line):
                 section = line.title()
-            continue
+                continue
+            # Restaurant menus often put the dish name and its printed price in
+            # neighboring HTML/PDF text nodes. Join only adjacent source lines and
+            # keep both verbatim lines as the evidence excerpt.
+            if len(line) < 140 and not re.search(r"\d", line):
+                next_index = index
+                while next_index < min(len(lines), index + 2) and not lines[next_index].strip():
+                    next_index += 1
+                if next_index < min(len(lines), index + 2):
+                    price_line = " ".join(lines[next_index].split()).strip(" •·-–—")
+                    if STANDALONE_PRICE_PATTERN.fullmatch(price_line):
+                        evidence_lines = [line]
+                        if next_index > index:
+                            evidence_lines.extend(
+                                " ".join(value.split()).strip(" •·-–—")
+                                for value in lines[index:next_index]
+                                if value.strip()
+                            )
+                        evidence_lines.append(price_line)
+                        combined = " ".join(evidence_lines)
+                        found = PRICE_PATTERN.fullmatch(combined)
+                        if found:
+                            evidence = "\n".join(evidence_lines)
+                            index = next_index + 1
+            if not found:
+                continue
         raw_name = found.group("name").strip(" .-–—•")
         parts = re.split(r"\s+(?:—|–|\|)\s+", raw_name, maxsplit=1)
         name = parts[0]
@@ -327,22 +370,25 @@ def _parse_menu_lines(
         currency = (
             code.upper() if code else "EUR" if symbol == "€" else "GBP" if symbol == "£" else None
         )
-        amount = float(found.group("amount").replace(",", "."))
-        status, warnings = _dietary_status(line, request)
+        amount = _parse_amount(found.group("amount"))
+        searchable_evidence = evidence.replace("\n", " ")
+        status, warnings = _dietary_status(searchable_evidence, request)
         items.append(
             MenuItem(
                 name=name,
-                original_text=line,
+                original_text=evidence,
                 description=description.strip() or None,
                 price=amount,
                 currency=currency,
                 section=section,
                 source_url=source_url,
-                evidence=line,
+                evidence=evidence,
                 dietary_status=status,
                 allergen_status=(
                     "conflict"
-                    if any(_term_is_present(line, term) for term in request.allergies)
+                    if any(
+                        _term_is_present(searchable_evidence, term) for term in request.allergies
+                    )
                     else "unknown"
                 ),
                 warnings=warnings,
@@ -353,6 +399,63 @@ def _parse_menu_lines(
                 "Allergen safety is unknown from this menu line; confirm with the restaurant."
             )
     return items[:100]
+
+
+def _unpriced_evidence_item(
+    evidence: MenuEvidence,
+    source_url: str,
+    request: RestaurantSearchRequest,
+    *,
+    exact_text_match: bool,
+) -> MenuItem | None:
+    if not evidence.name or evidence.name.casefold() not in evidence.quote.casefold():
+        return None
+    searchable_quote = evidence.quote.replace("\n", " ")
+    diet_status, diet_warnings = (
+        _dietary_status(searchable_quote, request)
+        if exact_text_match
+        else ("unknown", ["Scanned menu text could not confirm dietary suitability."])
+    )
+    return MenuItem(
+        name=evidence.name,
+        original_text=evidence.quote,
+        section=evidence.section,
+        price=None,
+        currency=None,
+        source_url=source_url,
+        evidence=evidence.quote,
+        evidence_type="printed_text" if exact_text_match else "ocr_transcription",
+        extraction_confidence=1.0 if exact_text_match else 0.5,
+        dietary_status=diet_status,
+        allergen_status=(
+            "conflict"
+            if any(_term_is_present(searchable_quote, term) for term in request.allergies)
+            else "unknown"
+        ),
+        warnings=["No individual printed price was found for this dish.", *diet_warnings],
+    )
+
+
+def _parse_amount(value: str) -> float:
+    separators = [separator for separator in (".", ",") if separator in value]
+    if not separators:
+        return float(value)
+    if len(separators) == 2:
+        decimal_separator = "." if value.rfind(".") > value.rfind(",") else ","
+        grouping_separator = "," if decimal_separator == "." else "."
+        return float(value.replace(grouping_separator, "").replace(decimal_separator, "."))
+    separator = separators[0]
+    chunks = value.split(separator)
+    if len(chunks) > 2:
+        if len(chunks[0]) <= 3 and all(len(chunk) == 3 for chunk in chunks[1:]):
+            return float("".join(chunks))
+        whole = "".join(chunks[:-1])
+        fraction = chunks[-1]
+        return float(f"{whole}.{fraction}")
+    whole, _, fraction = value.rpartition(separator)
+    if len(fraction) == 3 and whole.isdigit() and len(whole) <= 3:
+        return float(whole + fraction)
+    return float(f"{whole}.{fraction}")
 
 
 def _dietary_status(line: str, request: RestaurantSearchRequest) -> tuple[str, list[str]]:
@@ -420,18 +523,40 @@ def _term_is_present(text: str, term: str) -> bool:
 
 
 def _score_candidate(
-    items: list[MenuItem], request: RestaurantSearchRequest
+    items: list[MenuItem],
+    request: RestaurantSearchRequest,
+    *,
+    place_type: str | None = None,
 ) -> tuple[str, int, list[str]]:
     if not items:
         return "uncertain", 0, ["No source-backed priced dishes were extracted."]
-    eligible = [item for item in items if item.dietary_status != "contradicted"]
+    for item in items:
+        item.match_status, item.match_reasons = _evaluate_dish_match(item, request)
+    eligible = [item for item in items if item.match_status != "excluded"]
     if not eligible:
-        return "excluded", 0, ["All extracted dishes contain a user-specified avoid term."]
+        return "excluded", 0, ["All extracted dishes conflict with a hard requirement."]
     reasons: list[str] = []
     budget_known = request.max_budget_per_person is None
     budget_match = request.max_budget_per_person is None
     budget_has_uncomparable_items = False
     comparable_prices: list[float] = []
+    matches = [item for item in eligible if item.match_status == "match"]
+    needs_checking = [item for item in eligible if item.match_status == "needs_checking"]
+    if matches:
+        examples = ", ".join(
+            f"{item.name} ({item.currency} {item.price:.2f})"
+            for item in matches[:2]
+            if item.currency and item.price is not None
+        )
+        reasons.append(
+            f"{len(matches)} dish{'' if len(matches) == 1 else 'es'} meet the verifiable "
+            "dish requirements" + (f", including {examples}." if examples else ".")
+        )
+    if needs_checking:
+        reasons.append(
+            f"{len(needs_checking)} dish{'' if len(needs_checking) == 1 else 'es'} "
+            "need more evidence before they can be treated as a match."
+        )
     for item in eligible:
         if request.max_budget_per_person is not None:
             if item.evidence_type == "ocr_transcription":
@@ -447,9 +572,6 @@ def _score_candidate(
                     comparable_prices.append(item.price)
                     if item.price <= request.max_budget_per_person:
                         budget_match = True
-                        reasons.append(
-                            f"{item.name} is within the stated budget at its printed price."
-                        )
             elif not request.currency:
                 budget_has_uncomparable_items = True
                 reasons.append("Budget cannot be checked until a currency is specified.")
@@ -458,11 +580,44 @@ def _score_candidate(
                 reasons.append(
                     "Printed price currency is missing or differs from the requested currency."
                 )
+    if request.max_budget_per_person is not None:
+        in_budget = [
+            item for item in matches if item.price is not None and item.currency == request.currency
+        ]
+        if in_budget:
+            cheapest = min(in_budget, key=lambda item: item.price or 0)
+            reasons.append(
+                f"{len(in_budget)} matching dish{'' if len(in_budget) == 1 else 'es'} have a "
+                f"verified price within {request.currency} {request.max_budget_per_person:.2f}; "
+                "lowest listed price is "
+                f"{cheapest.name} ({cheapest.currency} {cheapest.price:.2f})."
+            )
+        unchecked_prices = sum(
+            item.price is None or item.currency != request.currency for item in eligible
+        )
+        if unchecked_prices:
+            reasons.append(
+                f"{unchecked_prices} dish{'' if unchecked_prices == 1 else 'es'} "
+                "lack a comparable verified price for the requested budget."
+            )
     cuisine_preferences = request.preferred_cuisines or (
         [request.preferred_cuisine] if request.preferred_cuisine else []
     )
-    if request.meal or cuisine_preferences:
-        reasons.append("Meal timing or cuisine has not been independently verified.")
+    normalized_place_type = (place_type or "").casefold()
+    matched_cuisines = [
+        cuisine for cuisine in cuisine_preferences if cuisine.casefold() in normalized_place_type
+    ]
+    cuisine_verified = bool(matched_cuisines)
+    cuisine_unverified = bool(cuisine_preferences) and not cuisine_verified
+    if cuisine_verified:
+        reasons.append(
+            f"Google Places lists this as {place_type}, matching "
+            f"{', '.join(matched_cuisines)} cuisine."
+        )
+    if request.meal:
+        reasons.append("Meal-time availability has not been verified from opening hours.")
+    if cuisine_unverified:
+        reasons.append("Cuisine is not confirmed by the restaurant listing category.")
     if request.party_size:
         reasons.append("Party size suitability has not been independently verified.")
     if request.other_preferences:
@@ -472,7 +627,7 @@ def _score_candidate(
         for item in eligible
     )
     other_constraints_verified = (
-        not request.meal and not cuisine_preferences and not request.party_size
+        not request.meal and not cuisine_unverified and not request.party_size
     )
     if (
         confirmed
@@ -506,7 +661,7 @@ def _score_candidate(
         or request.avoided_ingredients
         or (request.max_budget_per_person is not None and request.currency is None)
         or request.meal is not None
-        or bool(cuisine_preferences)
+        or cuisine_unverified
         or request.party_size is not None
         or bool(request.other_preferences)
     ):
@@ -524,3 +679,55 @@ def _score_candidate(
         60,
         list(dict.fromkeys(reasons or ["Some constraints remain unverified."])),
     )
+
+
+def _evaluate_dish_match(item: MenuItem, request: RestaurantSearchRequest) -> tuple[str, list[str]]:
+    if item.dietary_status == "contradicted":
+        return "excluded", list(dict.fromkeys(item.warnings)) or [
+            "Menu text contradicts a dietary requirement."
+        ]
+    if item.allergen_status == "conflict":
+        return "excluded", ["Menu text contains a requested allergen."]
+
+    reasons: list[str] = []
+    if request.dietary_requirements:
+        if item.dietary_status == "confirmed" and item.evidence_type == "printed_text":
+            reasons.append("Printed menu text explicitly confirms the requested dietary label.")
+        else:
+            reasons.append("Dietary suitability is not confirmed by this menu evidence.")
+    if request.allergies:
+        reasons.append("Allergen absence cannot be confirmed from this menu text.")
+    if request.avoided_ingredients:
+        reasons.append("Absence of avoided ingredients cannot be confirmed from this menu text.")
+
+    unresolved = False
+    if request.max_budget_per_person is not None:
+        if item.evidence_type == "ocr_transcription":
+            reasons.append("OCR price needs manual checking against the printed menu.")
+            unresolved = True
+        elif item.price is None or item.currency is None or request.currency is None:
+            reasons.append("A printed price and matching currency are needed to check the budget.")
+            unresolved = True
+        elif item.currency != request.currency:
+            reasons.append(
+                f"Printed price is in {item.currency}, not requested {request.currency}; "
+                "no exchange rate was applied."
+            )
+            unresolved = True
+        elif item.price > request.max_budget_per_person:
+            return "excluded", [
+                f"Printed price {item.currency} {item.price:.2f} exceeds the "
+                f"{request.currency} {request.max_budget_per_person:.2f} per-person limit."
+            ]
+        else:
+            reasons.append(
+                f"Printed price {item.currency} {item.price:.2f} is within the "
+                f"{request.currency} {request.max_budget_per_person:.2f} limit."
+            )
+    if request.dietary_requirements and item.dietary_status != "confirmed":
+        unresolved = True
+    if request.allergies or request.avoided_ingredients:
+        unresolved = True
+    if unresolved:
+        return "needs_checking", list(dict.fromkeys(reasons))
+    return "match", reasons or ["No conflict with the provided dish-level requirements was found."]

@@ -20,6 +20,10 @@ class PlaceRecord:
         business_status: str | None,
         latitude: float | None = None,
         longitude: float | None = None,
+        rating: float | None = None,
+        user_rating_count: int | None = None,
+        primary_type_display_name: str | None = None,
+        price_level: str | None = None,
     ) -> None:
         self.place_id = place_id
         self.name = name
@@ -29,6 +33,10 @@ class PlaceRecord:
         self.business_status = business_status
         self.latitude = latitude
         self.longitude = longitude
+        self.rating = rating
+        self.user_rating_count = user_rating_count
+        self.primary_type_display_name = primary_type_display_name
+        self.price_level = price_level
 
 
 class PlaceSearchProvider(Protocol):
@@ -56,6 +64,10 @@ class GooglePlacesProvider:
             "places.googleMapsUri",
             "places.businessStatus",
             "places.location",
+            "places.rating",
+            "places.userRatingCount",
+            "places.primaryTypeDisplayName",
+            "places.priceLevel",
         )
     )
 
@@ -169,6 +181,12 @@ class GooglePlacesProvider:
                         business_status=_optional_text(place.get("businessStatus")),
                         latitude=_coordinate(place.get("location"), "latitude"),
                         longitude=_coordinate(place.get("location"), "longitude"),
+                        rating=_rating(place.get("rating")),
+                        user_rating_count=_integer(place.get("userRatingCount")),
+                        primary_type_display_name=_display_name(
+                            place.get("primaryTypeDisplayName")
+                        ),
+                        price_level=_optional_text(place.get("priceLevel")),
                     )
                 )
             if places and not output:
@@ -203,6 +221,22 @@ def _coordinate(value: object, key: str) -> float | None:
         return None
     coordinate = value.get(key)
     return float(coordinate) if isinstance(coordinate, (int, float)) else None
+
+
+def _rating(value: object) -> float | None:
+    if isinstance(value, (int, float)) and 0 <= value <= 5:
+        return float(value)
+    return None
+
+
+def _integer(value: object) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def _display_name(value: object) -> str | None:
+    if isinstance(value, dict):
+        return _optional_text(value.get("text"))
+    return _optional_text(value)
 
 
 def _is_quota_response(response: httpx.Response) -> bool:

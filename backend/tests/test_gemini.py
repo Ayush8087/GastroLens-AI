@@ -101,7 +101,7 @@ async def test_menu_extraction_accepts_only_exact_source_quotes_and_translation_
             )
         payload = json.loads(request.content)
         prompt = payload["contents"][0]["parts"][0]["text"]
-        if prompt.startswith("Find menu entries"):
+        if prompt.startswith("Find individual dish entries"):
             return _gemini_response(
                 {
                     "items": [
@@ -149,6 +149,32 @@ async def test_menu_extraction_accepts_only_exact_source_quotes_and_translation_
     assert item.translated_text == "Tofu bowl"
     assert item.translated_description == "With sesame"
     assert item.dietary_status == "confirmed"
+
+
+@pytest.mark.anyio
+async def test_gemini_can_return_an_exactly_quoted_dish_without_a_price() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        prompt = json.loads(request.content)["contents"][0]["parts"][0]["text"]
+        assert "whether or not a price is printed" in prompt
+        return _gemini_response(
+            {
+                "items": [
+                    {
+                        "quote": "Focaccia rustica with rosemary",
+                        "name": "Focaccia rustica",
+                        "section": "Antipasti",
+                    }
+                ]
+            }
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        items = await GeminiResearchProvider(
+            SecretStr("test-key"), client=client
+        ).extract_menu_evidence("Antipasti\nFocaccia rustica with rosemary")
+    assert len(items) == 1
+    assert items[0].quote == "Focaccia rustica with rosemary"
+    assert items[0].name == "Focaccia rustica"
 
 
 async def _allow_url() -> bool:
