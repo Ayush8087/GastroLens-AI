@@ -32,6 +32,8 @@ Locations, currencies, cuisines, and dietary requirements are user-provided. The
 - [Checks](#checks)
 - [Deployment](#deployment)
 - [Known limitations](#known-limitations)
+- [Current agent limitations](#current-agent-limitations)
+- [Assumptions incorporated](#assumptions-incorporated)
 - [Project documentation](#project-documentation)
 
 ## What the application does
@@ -436,6 +438,26 @@ The backend must be reachable over HTTPS from the deployed browser. Configure pr
 - SSRF checks validate DNS separately from outbound HTTP connection resolution; use network egress controls in production.
 
 See [docs/limitations.md](docs/limitations.md) for the detailed limitation register and [docs/assumptions.md](docs/assumptions.md) for product assumptions.
+
+### Current agent limitations
+
+The current research agent depends on external provider coverage and evidence quality. Its results are not guaranteed to be complete or current, and its checks cannot replace confirmation from a restaurant for safety-critical or time-sensitive needs.
+
+- Google Places and Tavily may have incomplete coverage or be unavailable for a requested location.
+- Gemini interpretation, structured extraction, scanned-document OCR, and translation require a valid API key and model access; failures can leave these features unavailable for a request.
+- Complex menus, image-only pages, scanned files, and outdated sources may prevent reliable extraction.
+- Menu labels cannot establish allergy safety, cross-contamination controls, kitchen practices, or current availability.
+- Budget checks cover individual printed dishes only. The agent does not convert currencies or estimate the total cost of a meal.
+- Review text, opening hours, table reservations, and saved or persisted searches are not supported.
+
+### Assumptions incorporated
+
+- Explicit structured filters take precedence over conflicting constraints parsed from natural language.
+- Missing or ambiguous dietary, allergen, price, location, and source facts remain unknown; they are not treated as matches or evidence of safety.
+- Search snippets can help locate source pages but cannot establish menu contents, printed prices, or dietary suitability.
+- A budget match requires a printed dish price and a matching explicit currency. No exchange rate or currency is inferred.
+- AI output is advisory. Application code validates evidence and makes final eligibility and ranking decisions deterministically.
+- Browser coordinates are used only after the user grants location permission. A text location or radius is not treated as an exact distance measurement.
 
 ## Project documentation
 
