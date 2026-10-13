@@ -23,6 +23,7 @@ Locations, currencies, cuisines, and dietary requirements are user-provided. The
 - [Research flow](#research-flow)
 - [Repository layout](#repository-layout)
 - [Requirements](#requirements)
+- [Technology stack](#technology-stack)
 - [Configuration](#configuration)
 - [Run locally](#run-locally)
 - [Search API](#search-api)
@@ -139,6 +140,26 @@ GastroLens-AI/
 - [`uv`](https://docs.astral.sh/uv/) for Python environments and dependencies.
 - Node.js **20.9 or newer** and npm for the frontend.
 - Provider credentials as described in [Configuration](#configuration). A local run without credentials can start, but external discovery/research features will return honest configuration or provider warnings rather than fabricated listings.
+
+## Technology stack
+
+| Area | Technology | Current use |
+| --- | --- | --- |
+| Web application | Next.js App Router, React, TypeScript | Responsive search UI, result rendering, browser geolocation, and streamed progress. |
+| Styling | Tailwind CSS 4 with project CSS | Frontend styling and responsive layout. |
+| API | Python 3.12–3.13, FastAPI, Pydantic | Request validation, JSON and SSE endpoints, and response schemas. |
+| Python packages | `uv` with `pyproject.toml` and `uv.lock` | Backend dependency and environment management. |
+| Restaurant discovery | Google Places API (New) | Primary structured restaurant listing provider. |
+| Web search | Tavily Search API | Menu/source lookup and lower-confidence listing fallback. |
+| AI assistance | Gemini API over HTTPX | Optional query interpretation, menu evidence extraction, scanned-PDF OCR fallback, and translation. |
+| Web extraction | HTTPX, Beautiful Soup, Trafilatura | Safe source retrieval and HTML/text extraction. |
+| PDF menus | PyMuPDF | Local extraction from text-based PDFs; Gemini OCR fallback is optional for supported scanned documents. |
+| Database foundation | PostgreSQL, SQLAlchemy, Alembic, psycopg | Dependencies and configuration are present, but current searches are not persisted and do not use the database. |
+| Backend quality | Pytest, pytest-cov, Ruff | Backend tests, coverage support, and linting. |
+| Frontend quality | Vitest, Testing Library, ESLint, TypeScript compiler | UI tests, linting, and type checking. |
+| Deployment target | Vercel frontend, Python ASGI backend host (for example Render) | Frontend and API deploy as separate services. |
+
+The concrete dependency constraints are maintained in [backend/pyproject.toml](backend/pyproject.toml) and [frontend/package.json](frontend/package.json); lockfiles keep installs reproducible. Provider adapters are backend-only, so provider credentials are never needed in the browser.
 
 ## Configuration
 
@@ -404,23 +425,32 @@ Tests use mocked HTTP/provider responses and do not need real API keys. Do not c
 
 ## Deployment
 
-The intended split is a Next.js frontend deployed to Vercel and the FastAPI backend deployed to a Python-compatible ASGI host.
+The intended split is a Next.js frontend deployed to Vercel and the FastAPI backend deployed as a Python web service on a Python-compatible ASGI host such as Render. They are separate deployments: the frontend calls the backend over HTTPS. PostgreSQL is not required for the current search flow because it does not store searches.
 
 ### Backend host
 
-1. Set the service root to `backend/` (or set the host's working directory there).
-2. Use Python `3.13.11` from `backend/.python-version`; the project supports Python `>=3.12,<3.14`.
-3. Install dependencies with `uv sync --no-dev` or the host's supported `uv` workflow.
-4. Start the ASGI app with `uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT` (adapt the port syntax to the host).
-5. Add provider keys and set `CORS_ORIGINS` to the exact deployed frontend origin.
+For a Render Web Service:
+
+1. Connect the Git repository and select **Python** as the runtime.
+2. Set the root directory to `backend` so the service uses `backend/.python-version`, `pyproject.toml`, and `uv.lock`.
+3. Set the build command to `uv sync --no-dev`.
+4. Set the start command to `uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+5. Add `GOOGLE_PLACES_API_KEY`, `TAVILY_API_KEY`, and `GEMINI_API_KEY` in the host's secret environment settings as needed. Add `GEMINI_MODEL` only if overriding the default.
+6. Set `CORS_ORIGINS` to the exact production Vercel origin, such as `https://your-project.vercel.app` (no trailing slash). Do not use `*`.
+7. If the host supports a health-check path, set it to `/health`.
+8. Deploy, then check `/health` for process liveness and `/health/providers` to confirm which keys are configured. The latter does not test credentials against providers.
+
+Python is pinned to `3.13.11` in `backend/.python-version`; the project allows Python `>=3.12,<3.14`. Use a host/runtime configuration that honors this pin. If the host uses a different port variable or command syntax, adapt the start command while binding to `0.0.0.0` and the port supplied by the platform.
 
 ### Vercel frontend
 
-1. Set the project root directory to `frontend/`.
-2. Set `NEXT_PUBLIC_API_BASE_URL` to the deployed backend base origin, without `/api/v1` or a trailing route.
-3. Deploy and verify browser calls reach the backend's `/api/v1/restaurants/search/stream` endpoint.
+1. Import the same Git repository into Vercel and set the project root directory to `frontend`.
+2. Use the Next.js framework preset. The package scripts provide `npm run build`; install dependencies with `npm ci` from `frontend`.
+3. Add `NEXT_PUBLIC_API_BASE_URL` in Vercel's environment settings for Preview/Production as appropriate. Set it to the backend's HTTPS base origin, for example `https://your-api.onrender.com`; do not append `/api/v1` or the search route.
+4. Redeploy after changing environment variables; `NEXT_PUBLIC_` values are embedded into the browser bundle during the build.
+5. Open the deployed site, submit a search, and verify that the browser reaches `/api/v1/restaurants/search/stream` and receives progress or a clear provider-configuration warning.
 
-The backend must be reachable over HTTPS from the deployed browser. Configure provider credentials only in the backend host's secret settings. PostgreSQL is not required for the current workflow because searches are not persisted.
+The backend must be reachable over HTTPS from the deployed browser. Configure provider credentials only in the backend host's secret settings. Keep `NEXT_PUBLIC_API_BASE_URL` limited to the public backend origin; it is visible to every browser visitor.
 
 ## Known limitations
 
