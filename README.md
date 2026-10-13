@@ -1,103 +1,438 @@
-# GastroLens-AI
+# GastroLens AI
 
-GastroLens researches restaurants against user-provided locations and preferences, then returns source-linked menu findings with uncertainty visible. Locations, currencies, cuisines, and dietary preferences are not hardcoded. Coverage depends on Google Places and Tavily availability in the requested area.
+**Evidence-first restaurant research for the meal you actually want.** GastroLens takes a natural-language request and optional filters, discovers restaurant candidates, looks for accessible menu sources, extracts menu evidence, and compares dishes with deterministic rules. The app shows where each important claim came from and leaves uncertain facts visibly uncertain.
 
-## Current workflow
+Locations, currencies, cuisines, and dietary requirements are user-provided. There is no default city or dietary profile. Search coverage depends on the providers and their coverage in the requested area.
 
-- Natural-language requests are interpreted by Gemini when configured, then validated against the original text. A conservative phrase parser remains as a fallback.
-- Google Places is the structured discovery provider. Tavily provides a lower-confidence restaurant lead fallback and finds candidate restaurant/menu sources.
-- Menu links are searched on restaurant websites and retrieved only after HTTP(S), public-address, redirect, timeout, and response-size checks.
-- HTML and text PDFs are parsed locally. Gemini can return structured exact source quotes; each quoted item is checked against retrieved text and the printed price is parsed locally. Scanned PDF OCR is attempted through Gemini when text extraction yields no priced items.
-- Gemini translations are separate fields; the original name, description, price, currency, and evidence remain unchanged.
-- Deterministic Python rules evaluate explicit menu labels, literal avoid conflicts, printed prices, currencies, and location distance. Unknown allergy or dietary status is never treated as safe.
-- The frontend streams actual backend progress, supports browser geolocation, shows dish evidence and links, and includes loading, retry, cancellation, warning, and empty states.
+> GastroLens is a research aid. A menu listing or dietary label does not guarantee that a dish is currently available or safe for an allergy. Contact the restaurant to confirm critical requirements.
 
-Review analysis, reservations, persistence, currency conversion, and complete worldwide coverage are not implemented. Scanned PDF vision extraction and Gemini outputs require a configured key and have not been live-tested in this workspace. OCR transcripts are surfaced as unverified suggestions and cannot qualify dietary or hard budget matches.
+## Contents
+
+- [What the application does](#what-the-application-does)
+- [Research flow](#research-flow)
+- [Repository layout](#repository-layout)
+- [Requirements](#requirements)
+- [Configuration](#configuration)
+- [Run locally](#run-locally)
+- [Search API](#search-api)
+- [How evidence and matching work](#how-evidence-and-matching-work)
+- [Providers and coverage](#providers-and-coverage)
+- [Security and privacy](#security-and-privacy)
+- [Checks](#checks)
+- [Deployment](#deployment)
+- [Known limitations](#known-limitations)
+- [Project documentation](#project-documentation)
+
+## What the application does
+
+The current vertical slice includes:
+
+- A responsive Next.js search experience with a natural-language request, optional location and filters, browser geolocation, streaming progress, cancellation, retry/error states, and evidence-focused results.
+- A FastAPI backend with validated Pydantic request and response models, a JSON search route, and a Server-Sent Events (SSE) route for progress updates.
+- Google Places as the primary structured restaurant discovery provider.
+- Tavily as a best-effort web-search fallback for restaurant leads when Google Places is missing, unavailable, or returns no listings. Tavily also searches for source and menu pages for Google Places candidates.
+- Safe retrieval and local extraction for supported HTML pages and text-based PDFs, with optional Gemini structured extraction, scanned-PDF OCR fallback, request interpretation, and translation.
+- Deterministic per-dish and per-restaurant matching, ranking, and explanation. The language model does not make the final eligibility or ranking decision.
+- Mocked backend and frontend tests so tests do not require provider credentials or paid calls.
+
+Restaurant ratings, review counts, types, and price levels may appear when Google Places returns those fields. GastroLens does **not** retrieve review text, prove opening-hour availability, reserve tables, or claim complete geographic coverage.
+
+## Research flow
+
+```mermaid
+flowchart TD
+    A[User enters a request and optional filters] --> B[Next.js validates form values]
+    B --> C[POST search/stream]
+    C --> D[Pydantic validates constraints]
+    D --> E{Gemini configured?}
+    E -->|Yes| F[Interpret request; retain only query-grounded additions]
+    E -->|No or unavailable| G[Conservative phrase parsing and explicit filters]
+    F --> H[Build location-aware search query]
+    G --> H
+    H --> I{Google Places returns candidates?}
+    I -->|Yes| J[Keep structured identity and place fields]
+    I -->|No, missing, or unavailable| K{Tavily configured?}
+    K -->|Yes| L[Return lower-confidence web leads]
+    K -->|No or unavailable| M[Return empty results with provider warnings]
+    J --> N[Tavily locates candidate source and menu pages when configured]
+    L --> O[Verify candidate URLs and pages]
+    N --> O
+    O --> P{Safe, accessible menu found?}
+    P -->|No| Q[Keep candidate; report menu limitation]
+    P -->|Yes| R[Fetch bounded HTML or PDF]
+    R --> S[Extract text locally; optionally request structured Gemini evidence]
+    S --> T[Validate quotes and printed prices against source text]
+    T --> U[Optionally translate into separate display fields]
+    Q --> V[Deterministic matching and scoring]
+    U --> V
+    V --> W[Return evidence, uncertainty, score, reasons, and warnings]
+    W --> X[Frontend renders progress and research results]
+```
+
+### Live progress events
+
+The browser consumes the streaming route. The backend sends `progress` events while researching, followed by exactly one terminal `result` or `error` event. Closing or canceling the browser request cancels the in-flight research task where supported by the server/runtime.
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant API as FastAPI
+    participant Research as Research services
+    participant Providers as Google / Tavily / Gemini
+    Browser->>API: POST /search/stream (JSON)
+    API-->>Browser: event: progress (stage)
+    API->>Research: validate and run discovery
+    Research->>Providers: provider requests as configured
+    Providers-->>Research: listings and source evidence
+    Research-->>API: progress stages and final response
+    API-->>Browser: event: result (JSON response)
+```
+
+## Repository layout
+
+```text
+GastroLens-AI/
+├── backend/
+│   ├── app/
+│   │   ├── api/routes/          # FastAPI health and restaurant endpoints
+│   │   ├── core/                # Settings and structured logging
+│   │   ├── integrations/        # Google Places, Tavily, Gemini adapters
+│   │   ├── schemas/             # Pydantic API and evidence models
+│   │   ├── services/            # Discovery, verification, menu research, matching
+│   │   ├── db/                  # Database foundation (not used by current search flow)
+│   │   └── main.py              # FastAPI application and CORS
+│   ├── tests/                   # Deterministic mocked backend tests
+│   ├── .env.example
+│   ├── .python-version          # Render/runtime Python pin
+│   ├── pyproject.toml
+│   └── uv.lock
+├── frontend/
+│   ├── src/app/                 # Next.js App Router page, styles, and UI tests
+│   ├── public/                  # Static visual assets
+│   ├── .env.example
+│   ├── package.json
+│   └── package-lock.json
+├── docs/
+│   ├── architecture.md
+│   ├── assumptions.md
+│   ├── development.md
+│   └── limitations.md
+└── README.md
+```
 
 ## Requirements
 
-- Node.js 20.9+ and npm
-- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- `GOOGLE_PLACES_API_KEY` for structured discovery and coordinate-based search
-- `TAVILY_API_KEY` for menu/source discovery and web-search fallback
-- `GEMINI_API_KEY` for natural-language interpretation, structured extraction, scanned PDF fallback, and translation
+- Python **3.12 or 3.13**. The backend runtime pin is in `backend/.python-version` (`3.13.11`); `backend/pyproject.toml` allows `>=3.12,<3.14`.
+- [`uv`](https://docs.astral.sh/uv/) for Python environments and dependencies.
+- Node.js **20.9 or newer** and npm for the frontend.
+- Provider credentials as described in [Configuration](#configuration). A local run without credentials can start, but external discovery/research features will return honest configuration or provider warnings rather than fabricated listings.
 
-Enable Places API (New) in Google Cloud. Create a Tavily key in [Tavily](https://app.tavily.com/home). Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/app/apikey). Usage may incur provider charges or be limited by quota; check each provider's current [Google Places pricing](https://mapsplatform.google.com/pricing/), [Tavily plans](https://tavily.com/#pricing), and [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing). Google Places is preferred. Tavily fallback results do not include structured Google ratings, hours, or verified addresses, and do not provide complete geographic coverage. If credentials are absent, the app does not fabricate results. Keys remain on the backend.
+## Configuration
 
-## Configure
+### Create local environment files
 
-From the repository root in Windows PowerShell:
+Run from the repository root in PowerShell:
 
 ```powershell
 Copy-Item backend/.env.example backend/.env
 Copy-Item frontend/.env.example frontend/.env.local
 ```
 
-Add the provider values to `backend/.env`. The supported names are `GOOGLE_PLACES_API_KEY`, `TAVILY_API_KEY`, `GEMINI_API_KEY`, and optional `GEMINI_MODEL` (default `gemini-3.8-flash`). `APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, and `CORS_ORIGINS` are backend settings. Set `CORS_ORIGINS` to the exact frontend origin in deployment. `.env` files are Git-ignored.
+Or in macOS/Linux shells:
 
-For local development, `frontend/.env.example` can be copied to `frontend/.env.local`. It points to `http://localhost:8000`; the variable contains no secrets.
+```bash
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env.local
+```
+
+Edit `backend/.env` and enter your own provider keys. Never commit `.env` or `.env.local`. The repository ignore rules exclude local secret files; only placeholder values belong in `.env.example`.
+
+### Backend variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `GOOGLE_PLACES_API_KEY` | Recommended | Structured local restaurant listings and place identity. Enable Places API (New) in Google Cloud. |
+| `TAVILY_API_KEY` | Recommended | Web-search fallback for restaurant leads and source/menu lookup. |
+| `GEMINI_API_KEY` | Optional | Natural-language interpretation, structured menu extraction, scanned PDF OCR fallback, and translation. Without it, deterministic parsing/extraction still runs where possible. |
+| `GEMINI_MODEL` | Optional | Gemini model identifier; default is `gemini-3.8-flash`. |
+| `CORS_ORIGINS` | Set for deployment | Comma-separated exact browser origins allowed to call the API, e.g. `http://localhost:3000`. Use the deployed frontend origin in production. Wildcard origins are rejected. |
+| `APP_ENV` | Optional | `development`, `test`, or `production`; defaults to `development`. |
+| `LOG_LEVEL` | Optional | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`; defaults to `INFO`. |
+| `DATABASE_URL` | Optional / currently unused | PostgreSQL SQLAlchemy URL retained from the project foundation. The current restaurant search is not persisted and does not connect to PostgreSQL. |
+
+See [backend/.env.example](backend/.env.example) for the placeholder template. Provider keys are read by FastAPI and are never included in the frontend bundle.
+
+### Frontend variable
+
+`frontend/.env.example` defines:
+
+```dotenv
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+Set this to the backend's base origin (scheme and host, with an optional port), for example `https://your-api.example.com`. Do not include `/api/v1/...`; the client appends the endpoint path. The `NEXT_PUBLIC_` prefix means this value is public browser configuration, so never put secrets in it. If unset, the frontend defaults to `http://localhost:8000`.
+
+### Provider setup references
+
+- [Google Places API](https://developers.google.com/maps/documentation/places/web-service)
+- [Tavily](https://docs.tavily.com/)
+- [Gemini API](https://ai.google.dev/gemini-api/docs)
+
+Provider access, quotas, and usage charges depend on your accounts and current provider plans. The application does not verify a credential when reporting its local configuration status.
 
 ## Run locally
 
-Start the backend from `backend/`:
+Use two terminals from the repository root.
 
-```bash
+**Terminal 1 — backend**
+
+```powershell
+Set-Location backend
 uv sync --dev
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Start the frontend from `frontend/`:
+**Terminal 2 — frontend**
 
-```bash
+```powershell
+Set-Location frontend
 npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000`. The API liveness endpoint is `/health`; development OpenAPI docs are at `/docs`.
-Check local key configuration without making provider requests at `http://localhost:8000/health/providers` or with `Invoke-RestMethod http://localhost:8000/health/providers`. This endpoint reports only whether a key is configured; it does not validate credentials or spend API credits.
+Open [http://localhost:3000](http://localhost:3000). FastAPI OpenAPI docs are at [http://localhost:8000/docs](http://localhost:8000/docs). The API liveness check is [http://localhost:8000/health](http://localhost:8000/health).
+
+Check which provider variables are present without making paid network calls:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health/providers
+```
+
+The response reports a boolean `configured` value for each key and `live_checks_performed: false`. It does not validate that a configured key is accepted by its provider.
 
 ## Search API
 
-The frontend uses `POST /api/v1/restaurants/search/stream` for server-sent progress and a final result event. `POST /api/v1/restaurants/search` returns the same response as JSON for API clients.
+### Routes
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Process liveness; does not depend on external services. |
+| `GET` | `/health/providers` | Reports local key presence only; no provider requests. |
+| `POST` | `/api/v1/restaurants/search` | Runs research and returns a JSON response. |
+| `POST` | `/api/v1/restaurants/search/stream` | Same search with SSE `progress` and terminal `result`/`error` events; used by the web UI. |
+
+### Request fields
+
+The request is JSON. A location is required unless both latitude and longitude are provided. All user preference fields are optional.
+
+| Field | Type | Validation / meaning |
+| --- | --- | --- |
+| `query` | string or null | Natural-language request, 3–500 characters when supplied. |
+| `location` | string or null | Free-text city, area, region, or address, up to 160 characters. |
+| `latitude`, `longitude` | number or null | Must be provided together and be within geographic bounds. Browser location is only used after user permission. |
+| `search_radius_meters` | integer or null | 100–50,000 m. Without coordinates, it is only a query hint. |
+| `meal` | string or null | `breakfast`, `brunch`, `lunch`, `supper`, or `dinner`. |
+| `preferred_cuisine` | string or null | Legacy single cuisine field. |
+| `preferred_cuisines` | string array | Up to 8 arbitrary cuisine terms. |
+| `dietary_requirements` | string array | Up to 8 terms (each at most 50 characters). |
+| `avoided_ingredients` | string array | Up to 30 terms. |
+| `allergies` | string array | Up to 20 terms. |
+| `max_budget_per_person` | number or null | Positive maximum; checked against individual printed dish prices. |
+| `currency` | string or null | Three-letter currency code, normalized uppercase. No currency conversion is performed. |
+| `target_language` | string or null | Optional language for separate translated display fields. |
+| `party_size` | integer or null | 1–50. Suitability is not confirmed by current data providers. |
+| `other_preferences` | string array | Up to 12 free-text preferences; discovery hints only unless evidence is available. |
+| `max_results` | integer | 1–20; default 10. |
+
+Terms are trimmed and duplicate entries are removed case-insensitively. Explicit structured filters take precedence over conflicting details parsed from the natural-language request.
+
+### Example request
 
 ```json
 {
-  "query": "A relaxed dinner with vegetarian options in Kyoto",
+  "query": "A relaxed vegetarian dinner in Kyoto under 4000 JPY",
   "location": "Kyoto",
-  "search_radius_meters": 3000,
   "meal": "dinner",
-  "dietary_requirements": ["vegetarian", "no onion or garlic"],
-  "avoided_ingredients": [],
-  "allergies": [],
-  "preferred_cuisines": ["Maharashtrian", "Assamese"],
-  "party_size": 4,
-  "max_budget_per_person": null,
-  "currency": null,
+  "dietary_requirements": ["vegetarian"],
+  "max_budget_per_person": 4000,
+  "currency": "JPY",
   "target_language": "English",
-  "other_preferences": ["quiet", "outdoor seating"],
-  "max_results": 10
+  "max_results": 8
 }
 ```
 
-All constraints except the result limit are optional. Meal values include breakfast, brunch, lunch, supper, and dinner. Cuisine, diet, allergy, avoided ingredient, and preference lists accept arbitrary user-entered wording; values are trimmed and duplicate entries are removed without replacing the user's capitalization. When Gemini is unavailable, common meal, diet, location, radius, and budget expressions are parsed conservatively. A location is required unless browser coordinates are supplied. Geolocation uses explicit browser permission and a 5 km Places bias by default. Text-only radius values are hints and cannot enforce exact distance. Meal availability, cuisine identity, party-size suitability, and atmosphere/accessibility needs are reported as unverified because current providers do not offer enough evidence to confirm them.
+This is an example input only; it does not imply that any particular restaurant, menu, dish, or price will be returned.
 
-### Status meanings
+### Response shape
 
-- `discovered`: returned by the listing provider; no confirming restaurant website evidence was established.
-- `partially_verified`: at least one source was accessible, but restaurant identity or ownership is incomplete.
-- `verified`: an accessible restaurant-site candidate contains the provider-supplied restaurant name. This is a consistency check, not proof of ownership, current operation, or dietary suitability.
-- `exact_match`, `partial_match`, `uncertain`, `excluded`: deterministic menu-evidence assessment. A requested allergy or avoided ingredient is never treated as safe merely because a menu line omits it.
+Both search routes use `RestaurantSearchResponse` with these top-level fields:
 
-Scores use fixed evidence tiers: 90 for an explicitly labeled dietary match with a satisfied requested budget and no unresolved meal, cuisine, allergy, or avoid constraint; 60 for partial evidence; 35 when important facts remain unknown; and 0 for an excluded candidate. Exclusion requires explicit conflicting menu text or comparable printed prices that all exceed the budget. Results sort by status, score, name, then provider place ID.
+| Field | Contents |
+| --- | --- |
+| `criteria` | Validated and interpreted request constraints. |
+| `restaurants` | Ordered candidate records, including provider identity, optional rating/review count, source evidence, menu items, status, score, match reasons, and unknown fields. |
+| `warnings` | Missing provider, fallback, incomplete source, and unverified-constraint notes. |
+| `provider_coverage` | Plain-language note about the provider path and its limits. |
 
-Every extracted dish retains its source URL, source quote, and retrieval timestamp. Gemini extraction is accepted only when its proposed quote appears exactly in retrieved text (or is clearly marked as OCR from a bounded scanned PDF); dish names must also occur in the quote. A dish may be listed without a price when its exact source quote supports it, but it cannot count as within budget. Translation is separate and never changes source evidence or deterministic matching fields. Each dish shows a deterministic match status and reasons. An explicit dietary label is only treated as confirmed when the menu is on a verified official restaurant domain. Allergy safety remains unknown unless an allergen appears in the line, in which case the item is marked as a conflict. Printed price currency is not guessed from an ambiguous `$` sign. Budget checks require a matching explicit currency and apply per dish; there is no automatic currency conversion or inference about a full meal total. Google rating, review count, restaurant type, and provider price level are displayed when Google Places returns them. Review text and opening hours are not currently retrieved.
+Each `source_evidence` record retains its URL, optional final URL, title/snippet, source classification, retrieval time, accessibility/HTTP status, and note. Each `menu_item` retains the source URL, exact evidence quote, retrieval timestamp, extraction confidence, original text, optional separate translation, printed price/currency when known, and deterministic dietary/allergen/match status. Fields absent from the evidence remain null or are listed in `unknown_fields`.
+
+The streaming endpoint sends events as UTF-8 SSE frames, for example:
+
+```text
+event: progress
+data: {"stage":"Searching location-aware restaurant listings"}
+
+event: result
+data: {"criteria":{...},"restaurants":[...],"warnings":[],"provider_coverage":"..."}
+```
+
+On an unexpected stream failure, it emits an `error` event with a safe user-facing message. The ordinary JSON endpoint returns standard FastAPI validation details for invalid requests.
+
+## How evidence and matching work
+
+### Verification statuses
+
+| Status | Meaning in this implementation |
+| --- | --- |
+| `discovered` | A provider returned a candidate, but no accessible source consistency check has been established. |
+| `partially_verified` | At least one source page was accessible, but identity/ownership evidence is incomplete. |
+| `verified` | An accessible restaurant-site candidate contains the provider-supplied restaurant name. This is a consistency check, not proof of ownership or current operation. |
+
+Restaurant verification is separate from menu extraction and from dietary suitability. A restaurant with `verified` status can still have an unknown menu, unknown dietary suitability, or stale business data.
+
+### Dish and restaurant outcomes
+
+Dish outcomes:
+
+- `match`: the menu evidence supports requested dietary conditions and any budget check that can be performed.
+- `partial`: some matching evidence exists, but at least one requested constraint is unresolved.
+- `needs_checking`: available evidence cannot establish a safe/eligible match.
+- `excluded`: source text conflicts with a hard requirement, such as an explicitly avoided ingredient or a comparable printed price over budget.
+
+Restaurant outcomes:
+
+- `exact_match`: supported by explicit menu evidence and satisfiable requested hard constraints.
+- `partial_match`: some relevant evidence exists but a requested criterion remains unresolved.
+- `uncertain`: important identity, location, menu, or constraint evidence is missing.
+- `excluded`: a hard conflict is established, every comparable extracted price is over budget, the location is outside a coordinate-based radius, or the listing is reported closed by the provider.
+
+Unknown dietary status never counts as a confirmed match. Absence of an allergen from a menu line is not evidence that the dish is allergy-safe. OCR output from a scanned PDF is marked `ocr_transcription` and remains unverified; it cannot by itself qualify a hard dietary or budget match.
+
+### Deterministic score tiers
+
+Restaurant scores use fixed evidence tiers rather than an unconstrained AI ranking:
+
+| Score | Interpretation |
+| ---: | --- |
+| 90 | Exact evidence-backed match. |
+| 60 | Partial evidence-backed match. |
+| 35 | Important criteria remain uncertain. |
+| 0 | Excluded by a hard conflict. |
+
+Results sort by outcome (exact, partial, uncertain, excluded), score descending, restaurant name, then provider place ID. Location uncertainty caps the score at 35; out-of-radius or provider-reported closed listings are excluded. A score is an evidence tier, not a probability or guarantee.
+
+### Budget and price handling
+
+- A dish budget is checked using its printed menu price, not an inferred or typical price.
+- To pass a requested budget, the extracted currency must match the user's explicit currency. No exchange rates are fetched and no conversion is applied.
+- An ambiguous `$` is not guessed as USD, CAD, AUD, or another currency.
+- The check is per dish. It does not establish that a full meal, tax, tip, or service charge fits the budget.
+- A group/set-menu price does not become an individual dish price.
+- If price or currency is missing or incomparable, the dish needs checking rather than being counted as within budget.
+
+### AI boundary
+
+Gemini can propose parsed fields or menu evidence, but source validation and application code determine what is retained. Proposed menu quotes must be found in retrieved text; printed price parsing is done locally. Translation is stored separately and cannot alter original text, price, evidence, or match status. If Gemini is unavailable, basic phrase parsing and local extraction continue where possible; more complex natural-language interpretation, OCR, and translation may be absent.
+
+## Providers and coverage
+
+### Google Places (primary discovery)
+
+When configured, Places Text Search supplies structured listing data such as provider name, address, place ID, Maps URL, website, business status, coordinates, and—when returned by the configured API field mask and account tier—rating, review count, place type, and price level. Geographic coverage, freshness, and field availability vary. A search result is not a guarantee that every restaurant in an area was found.
+
+### Tavily (web-search fallback and source lookup)
+
+Tavily is used to find candidate source/menu pages and can provide restaurant leads when Places is missing, unavailable, or empty. Fallback results are explicitly lower confidence: the app cannot claim structured Google ratings, verified address, opening hours, or complete local coverage from Tavily. Coordinate-only discovery cannot fall back to text web search unless a textual location is also supplied.
+
+### Gemini (optional research assistance)
+
+Gemini supports query interpretation, structured menu extraction, bounded OCR fallback for certain scanned PDFs, and translation. A missing or rejected Gemini request does not create search results; warnings are surfaced and deterministic/local paths are used where possible. Configure `GEMINI_MODEL` if the default model is not enabled for your API key.
+
+Provider setup status is available from `/health/providers`; it only checks whether environment variables are non-empty. It does not make live requests or validate account permissions. Provider outages, rate limits, missing keys, and malformed responses are handled as warnings/errors; the app does not fill gaps with sample data.
+
+## Security and privacy
+
+- Provider secrets are server-side settings. Only the backend receives Google, Tavily, and Gemini credentials.
+- The frontend's `NEXT_PUBLIC_API_BASE_URL` is intentionally public and must contain only the backend origin.
+- CORS is restricted to configured origins; use the exact frontend origin for deployment.
+- Menu/source retrieval accepts HTTP(S) only and applies public-address checks, redirect validation, request timeouts, and response-size limits. Redirect destinations are rechecked. DNS validation and the eventual HTTP connection are separate; production egress filtering or DNS-pinned transport would further reduce DNS-rebinding risk.
+- Search requests are processed synchronously and are not persisted. The current PostgreSQL foundation is not connected to the workflow.
+- Search text and preferences are sent to configured external providers as needed to perform discovery and research. Review provider privacy and retention terms before production use.
 
 ## Checks
 
-From `backend/`: `uv run pytest` and `uv run ruff check app tests`.
+Run backend checks from `backend/`:
 
-From `frontend/`: `npm run lint`, `npm run typecheck`, and `npm run test`. The production build can be checked with `npm run build`.
+```powershell
+uv run pytest
+uv run ruff check app tests
+```
+
+Run frontend checks from `frontend/`:
+
+```powershell
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
+
+Tests use mocked HTTP/provider responses and do not need real API keys. Do not configure real keys in CI unless you deliberately want to run paid integration checks; the current test suite does not need live provider calls.
 
 ## Deployment
 
-Deploy `frontend/` from Vercel and deploy `backend/` as a Python ASGI service, for example with `uvicorn app.main:app`. Configure server-side provider keys and explicit CORS origins on the backend. Provider API usage may incur charges under the provider's account and terms.
+The intended split is a Next.js frontend deployed to Vercel and the FastAPI backend deployed to a Python-compatible ASGI host.
+
+### Backend host
+
+1. Set the service root to `backend/` (or set the host's working directory there).
+2. Use Python `3.13.11` from `backend/.python-version`; the project supports Python `>=3.12,<3.14`.
+3. Install dependencies with `uv sync --no-dev` or the host's supported `uv` workflow.
+4. Start the ASGI app with `uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT` (adapt the port syntax to the host).
+5. Add provider keys and set `CORS_ORIGINS` to the exact deployed frontend origin.
+
+### Vercel frontend
+
+1. Set the project root directory to `frontend/`.
+2. Set `NEXT_PUBLIC_API_BASE_URL` to the deployed backend base origin, without `/api/v1` or a trailing route.
+3. Deploy and verify browser calls reach the backend's `/api/v1/restaurants/search/stream` endpoint.
+
+The backend must be reachable over HTTPS from the deployed browser. Configure provider credentials only in the backend host's secret settings. PostgreSQL is not required for the current workflow because searches are not persisted.
+
+## Known limitations
+
+- Provider coverage is regional and incomplete; an empty result does not prove that no suitable restaurant exists.
+- Arbitrary free-text locations are accepted, but location autocomplete/geocoding is not integrated. Ambiguous locations depend on provider interpretation.
+- Text-only radius is a search hint. Distance filtering requires browser coordinates and candidate coordinates from Places.
+- Cuisine identity, meal-time availability, party-size suitability, atmosphere, accessibility, and similar soft preferences cannot currently be verified from the available data and are shown as such.
+- Google review text and opening hours are not retrieved. Rating and review count, when present, are listing metadata only.
+- HTML pages and text-based PDFs are supported. Complex layouts, image-only web menus, anti-bot sites, and some scanned PDFs may not be readable.
+- OCR is a suggestion from an image, not verifiable printed text. It cannot qualify hard budget or dietary constraints.
+- Dietary labels do not establish kitchen practices, cross-contamination controls, ingredient substitutions, halal/kosher certification, or allergy safety. Confirm these directly with the restaurant.
+- Menu content, prices, and provider listings can be outdated. Retrieval timestamps indicate when GastroLens fetched a source, not when the restaurant last updated it.
+- Budget is per printed dish with an explicitly comparable currency, not an estimate of total meal cost. There is no currency conversion.
+- There is no reservation, availability, review-analysis, user-account, persistence, or saved-search feature.
+- SSRF checks validate DNS separately from outbound HTTP connection resolution; use network egress controls in production.
+
+See [docs/limitations.md](docs/limitations.md) for the detailed limitation register and [docs/assumptions.md](docs/assumptions.md) for product assumptions.
+
+## Project documentation
+
+- [Architecture](docs/architecture.md) — component boundaries, provider flow, evidence and score decisions.
+- [Assumptions](docs/assumptions.md) — product and implementation assumptions.
+- [Limitations](docs/limitations.md) — coverage, extraction, verification, and security limits.
+- [Development](docs/development.md) — local development notes and API contract.
+
+## Contributing
+
+Keep provider-specific logic behind integration adapters and keep hard-constraint decisions in deterministic service code. When adding an extracted fact, preserve its source, quote or field provenance, and retrieval time. Extend mocked tests for new evidence paths and failure states; never add fabricated restaurant or menu fixtures to live application responses.
