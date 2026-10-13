@@ -6,9 +6,20 @@ Locations, currencies, cuisines, and dietary requirements are user-provided. The
 
 > GastroLens is a research aid. A menu listing or dietary label does not guarantee that a dish is currently available or safe for an allergy. Contact the restaurant to confirm critical requirements.
 
+## Product preview
+
+### Main interface
+
+![GastroLens main interface](docs/images/gastrolens-home.png)
+
+### Search and preferences
+
+![GastroLens search form and filters](docs/images/gastrolens-search.png)
+
 ## Contents
 
 - [What the application does](#what-the-application-does)
+- [Product preview](#product-preview)
 - [Research flow](#research-flow)
 - [Repository layout](#repository-layout)
 - [Requirements](#requirements)
